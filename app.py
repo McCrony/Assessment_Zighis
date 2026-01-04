@@ -1789,18 +1789,42 @@ def teacher_quiz_results():
     quiz_ids = [quiz.id for quiz in quizzes]
     attempts = QuizAttempt.query.filter(QuizAttempt.quiz_id.in_(quiz_ids)).order_by(QuizAttempt.completed_at.desc()).all()
     
-    # Group attempts by quiz
+    # Group attempts by quiz and calculate summaries
     attempts_by_quiz = {}
+    quiz_summaries = {}
+    
     for attempt in attempts:
-        if attempt.quiz_id not in attempts_by_quiz:
-            attempts_by_quiz[attempt.quiz_id] = []
-        attempts_by_quiz[attempt.quiz_id].append(attempt)
+        quiz_id = attempt.quiz_id
+        if quiz_id not in attempts_by_quiz:
+            attempts_by_quiz[quiz_id] = []
+            quiz_summaries[quiz_id] = {
+                'total_attempts': 0,
+                'avg_score': 0.0,
+                'highest_score': 0.0,
+                'completed_count': 0
+            }
+        attempts_by_quiz[quiz_id].append(attempt)
+        
+        # Update summary
+        summary = quiz_summaries[quiz_id]
+        summary['total_attempts'] += 1
+        percentage = attempt.get_percentage()
+        summary['avg_score'] += percentage
+        summary['highest_score'] = max(summary['highest_score'], percentage)
+        if attempt.completed_at:
+            summary['completed_count'] += 1
+    
+    # Calculate final averages
+    for quiz_id, summary in quiz_summaries.items():
+        if summary['total_attempts'] > 0:
+            summary['avg_score'] = summary['avg_score'] / summary['total_attempts']
     
     # Get student details
     student_ids = list(set(attempt.student_id for attempt in attempts))
     students = {student.id: student for student in Student.query.filter(Student.id.in_(student_ids)).all()}
     
-    return render_template("teacher_quiz_results.html", quizzes=quizzes, attempts_by_quiz=attempts_by_quiz, students=students)
+    return render_template("teacher_quiz_results.html", quizzes=quizzes, attempts_by_quiz=attempts_by_quiz, 
+                         students=students, quiz_summaries=quiz_summaries)
 
 
 @app.route("/admin/archive-term", methods=["POST"])

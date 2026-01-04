@@ -98,9 +98,11 @@
                             </table>
                         </div>
                         <div class="mt-3">
+                            {% set summary = quiz_summaries.get(quiz.id, {}) %}
                             <strong>Summary:</strong> {{ quiz_attempts|length }} attempt(s)
-                            {% set avg_score = quiz_attempts|sum(attribute='get_percentage') / quiz_attempts|length %}
-                            | Average Score: {{ "%.1f"|format(avg_score) }}%
+                            {% if summary.avg_score %}
+                            | Average Score: {{ "%.1f"|format(summary.avg_score) }}%
+                            {% endif %}
                         </div>
                     {% else %}
                         <p class="text-muted">No attempts recorded for this quiz yet.</p>
