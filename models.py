@@ -62,7 +62,7 @@ class User(UserMixin, db.Model):
         return f"<User id={self.id}>"
 
 
-class Student(db.Model):
+class Student(UserMixin, db.Model):
     __tablename__ = "students"
     
     id = db.Column(db.Integer, primary_key=True)

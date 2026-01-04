@@ -1690,6 +1690,14 @@ def edit_quiz(quiz_id):
     
     form = QuizForm()
     
+    # Set subject choices based on user role
+    if current_user.is_admin():
+        # Admin can choose any subject
+        form.subject.choices = [(subject, subject.replace('_', ' ').title()) for subject in app.config['LEARNING_AREAS']]
+    else:
+        # Teachers are limited to their subject
+        form.subject.choices = [(current_user.subject, current_user.subject.replace('_', ' ').title())]
+    
     if form.validate_on_submit():
         quiz.title = form.title.data
         quiz.description = form.description.data
@@ -1708,7 +1716,7 @@ def edit_quiz(quiz_id):
     
     # Pre-populate form
     form.title.data = quiz.title
-    form.description = form.description.data if form.description.data else quiz.description
+    form.description.data = quiz.description
     form.subject.data = quiz.subject
     form.time_limit.data = quiz.time_limit
     form.is_active.data = quiz.is_active
