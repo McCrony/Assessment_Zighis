@@ -1765,11 +1765,30 @@ def quiz_results_view(quiz_id):
     # Get all attempts for this quiz
     attempts = QuizAttempt.query.filter_by(quiz_id=quiz_id).order_by(QuizAttempt.completed_at.desc()).all()
     
+    # Calculate summary statistics
+    summary_stats = {
+        'total_attempts': len(attempts),
+        'avg_score': 0.0,
+        'highest_score': 0.0,
+        'completed_count': 0
+    }
+    
+    if attempts:
+        percentages = []
+        for attempt in attempts:
+            percentage = attempt.get_percentage()
+            percentages.append(percentage)
+            summary_stats['highest_score'] = max(summary_stats['highest_score'], percentage)
+            if attempt.completed_at:
+                summary_stats['completed_count'] += 1
+        
+        summary_stats['avg_score'] = sum(percentages) / len(percentages)
+    
     # Get student details
     student_ids = [attempt.student_id for attempt in attempts]
     students = {student.id: student for student in Student.query.filter(Student.id.in_(student_ids)).all()}
     
-    return render_template("quiz_results_view.html", quiz=quiz, attempts=attempts, students=students)
+    return render_template("quiz_results_view.html", quiz=quiz, attempts=attempts, students=students, summary_stats=summary_stats)
 
 
 @app.route("/teacher/quiz-results")

@@ -109,28 +109,25 @@
                                 </div>
                             </div>
                             <div class="col-md-3">
-                                {% set avg_score = attempts|sum(attribute='get_percentage') / attempts|length %}
                                 <div class="card bg-light">
                                     <div class="card-body text-center">
-                                        <h4 class="text-success">{{ "%.1f"|format(avg_score) }}%</h4>
+                                        <h4 class="text-success">{{ "%.1f"|format(summary_stats.avg_score) }}%</h4>
                                         <small class="text-muted">Average Score</small>
                                     </div>
                                 </div>
                             </div>
                             <div class="col-md-3">
-                                {% set highest = attempts|max(attribute='get_percentage') %}
                                 <div class="card bg-light">
                                     <div class="card-body text-center">
-                                        <h4 class="text-info">{{ "%.1f"|format(highest) }}%</h4>
+                                        <h4 class="text-info">{{ "%.1f"|format(summary_stats.highest_score) }}%</h4>
                                         <small class="text-muted">Highest Score</small>
                                     </div>
                                 </div>
                             </div>
                             <div class="col-md-3">
-                                {% set completed_count = attempts|selectattr('completed_at')|list|length %}
                                 <div class="card bg-light">
                                     <div class="card-body text-center">
-                                        <h4 class="text-warning">{{ completed_count }}</h4>
+                                        <h4 class="text-warning">{{ summary_stats.completed_count }}</h4>
                                         <small class="text-muted">Completed</small>
                                     </div>
                                 </div>
