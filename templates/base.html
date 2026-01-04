@@ -148,6 +148,9 @@
                         <a class="nav-link {% if 'admin_settings' in request.endpoint %}active{% endif %}" href="{{ url_for('admin_settings') }}">
                             <i class="bi bi-gear"></i> Settings
                         </a>
+                        <a class="nav-link {% if 'admin_activity_logs' in request.endpoint %}active{% endif %}" href="{{ url_for('admin_activity_logs') }}">
+                            <i class="bi bi-journal-text"></i> Activity Logs
+                        </a>
                         {% endif %}
                         
                         <div class="nav-divider"></div>

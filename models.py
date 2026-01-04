@@ -349,6 +349,23 @@ class Setting(db.Model):
         return f"<Setting term={self.current_term}, year={self.current_academic_year}>"
 
 
+class ActivityLog(db.Model):
+    __tablename__ = "activity_logs"
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    action = db.Column(db.String(100), nullable=False, index=True)
+    details = db.Column(db.Text, nullable=True)
+    ip_address = db.Column(db.String(45), nullable=True)  # IPv6 addresses can be up to 45 chars
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    
+    # Relationship
+    user = db.relationship("User", backref="activity_logs", lazy=True)
+    
+    def __repr__(self):
+        return f"<ActivityLog {self.user.username} - {self.action} at {self.timestamp}>"
+
+
 def init_db(app, bcrypt):
     db.init_app(app)
     

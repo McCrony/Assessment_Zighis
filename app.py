@@ -21,7 +21,7 @@ from wtforms import StringField, PasswordField, FloatField, SelectField, DateFie
 from wtforms.validators import InputRequired, Length, Optional, NumberRange
 
 from config import config
-from models import User, Student, Assessment, Setting, init_db
+from models import User, Student, Assessment, Setting, ActivityLog, init_db
 from excel_utils import ExcelTemplateHandler, ExcelBulkImporter, StudentBulkImporter, create_default_template, create_student_import_template
 
 # -------------------------
@@ -52,6 +52,27 @@ login_manager.login_view = "login"
 # Initialize database
 init_db(app, bcrypt)
 
+# -------------------------
+# Activity Logging
+# -------------------------
+def log_activity(user_id, action, details=None):
+    """Log user activity for auditing purposes"""
+    try:
+        ip_address = request.remote_addr if request else None
+        log_entry = ActivityLog(
+            user_id=user_id,
+            action=action,
+            details=details,
+            ip_address=ip_address
+        )
+        db.session.add(log_entry)
+        db.session.commit()
+    except Exception as e:
+        # Log to console if database logging fails
+        print(f"Failed to log activity: {e}")
+
+# -------------------------
+# Forms - FIXED: Remove duplicate definitions
 # -------------------------
 # Forms - FIXED: Remove duplicate definitions
 # -------------------------
@@ -180,6 +201,7 @@ def login():
         user = User.query.filter_by(username=form.username.data.strip()).first()
         if user and user.check_password(form.password.data, bcrypt):
             login_user(user)
+            log_activity(user.id, "login", f"User {user.username} logged in")
             flash("Logged in successfully", "success")
             next_page = request.args.get("next")
             return redirect(next_page or url_for("dashboard"))
@@ -223,6 +245,7 @@ def student_login():
                 db.session.commit()
             
             login_user(user)
+            log_activity(user.id, "student_login", f"Student {student.full_name()} ({student.student_number}) logged in")
             flash("Student login successful", "success")
             return redirect(url_for("student_dashboard"))
         else:
@@ -383,6 +406,7 @@ def student_new():
             db.session.add(student)
             db.session.commit()
             
+            log_activity(current_user.id, "create_student", f"Created student {student.full_name()} ({student.student_number})")
             flash(f"Student {student.full_name()} added successfully. Reference Number: {reference_number}", "success")
             return redirect(url_for("students"))
     
@@ -406,6 +430,7 @@ def student_edit(student_id):
         student.class_name = form.class_name.data if form.class_name.data else None
         student.study_area = form.study_area.data if form.study_area.data else None
         db.session.commit()
+        log_activity(current_user.id, "edit_student", f"Edited student {student.full_name()} ({student.student_number})")
         flash(f"Student {student.full_name()} updated successfully", "success")
         return redirect(url_for("students"))
     
@@ -419,6 +444,7 @@ def student_delete(student_id):
     student_name = student.full_name()
     db.session.delete(student)
     db.session.commit()
+    log_activity(current_user.id, "delete_student", f"Deleted student {student_name} ({student.student_number})")
     flash(f"Student {student_name} deleted successfully", "info")
     return redirect(url_for("students"))
 
@@ -697,6 +723,7 @@ def new_assessment():
             )
             db.session.add(assessment)
             db.session.commit()
+            log_activity(current_user.id, "create_assessment", f"Created assessment for {student.full_name()} ({assessment.category} in {assessment.subject})")
             flash(f"Assessment saved for {student.full_name()}", "success")
             return redirect(url_for("student_view", student_id=student.id))
     
@@ -746,6 +773,7 @@ def assessment_edit(assessment_id):
         assessment.assessor = form.assessor.data
         assessment.comments = form.comments.data
         db.session.commit()
+        log_activity(current_user.id, "edit_assessment", f"Edited assessment for {assessment.student.full_name()} ({assessment.category} in {assessment.subject})")
         flash("Assessment updated successfully", "success")
         return redirect(url_for("student_view", student_id=assessment.student_id))
     
@@ -765,6 +793,7 @@ def assessment_delete(assessment_id):
     student_id = assessment.student_id
     db.session.delete(assessment)
     db.session.commit()
+    log_activity(current_user.id, "delete_assessment", f"Deleted assessment for {assessment.student.full_name()} ({assessment.category} in {assessment.subject})")
     flash("Assessment deleted successfully", "info")
     return redirect(url_for("student_view", student_id=student_id))
 
@@ -869,6 +898,7 @@ def create_user():
             )
             db.session.add(user)
             db.session.commit()
+            log_activity(current_user.id, "create_user", f"Created user {user.username} with role {user.role}")
             flash(f"User {user.username} created successfully", "success")
             return redirect(url_for("users"))
     
@@ -886,6 +916,7 @@ def edit_user(user_id):
         user.subject = form.subject.data if form.subject.data else None
         user.class_name = form.class_name.data if form.class_name.data else None
         db.session.commit()
+        log_activity(current_user.id, "edit_user", f"Edited user {user.username}")
         flash(f"User {user.username} updated successfully", "success")
         return redirect(url_for("users"))
     
@@ -907,6 +938,7 @@ def reset_password(user_id):
     if form.validate_on_submit():
         user.password_hash = bcrypt.generate_password_hash(form.password.data).decode("utf-8")
         db.session.commit()
+        log_activity(current_user.id, "reset_password", f"Reset password for user {user.username}")
         flash(f"Password reset successfully for {user.username}", "success")
         return redirect(url_for("users"))
     
@@ -924,6 +956,7 @@ def delete_user(user_id):
     username = user.username
     db.session.delete(user)
     db.session.commit()
+    log_activity(current_user.id, "delete_user", f"Deleted user {username}")
     flash(f"User {username} deleted successfully", "info")
     return redirect(url_for("users"))
 
@@ -953,6 +986,18 @@ def admin_settings():
         return redirect(url_for("admin_settings"))
     
     return render_template("admin_settings.html", form=form, settings=settings)
+
+@app.route("/admin/activity-logs")
+@login_required
+@admin_required
+def admin_activity_logs():
+    """Admin can view activity logs"""
+    page = request.args.get('page', 1, type=int)
+    per_page = 50
+    
+    logs = ActivityLog.query.order_by(ActivityLog.timestamp.desc()).paginate(page=page, per_page=per_page, error_out=False)
+    
+    return render_template("activity_logs.html", logs=logs)
 
 # -------------------------
 # Teacher Routes
