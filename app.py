@@ -1904,18 +1904,22 @@ def edit_quiz(quiz_id):
         flash("Quiz updated successfully", "success")
         return redirect(url_for("teacher_quizzes"))
     
+    # Get available questions for this subject
+    available_questions = Question.query.filter_by(
+        subject=quiz.subject, 
+        status='approved'
+    ).all()
+    
+    # Set questions choices
+    form.questions.choices = [(q.id, f"{q.question_text[:50]}...") for q in available_questions]
+    
     # Pre-populate form
     form.title.data = quiz.title
     form.description.data = quiz.description
     form.subject.data = quiz.subject
     form.time_limit.data = quiz.time_limit
     form.is_active.data = quiz.is_active
-    
-    # Get available questions for this subject
-    available_questions = Question.query.filter_by(
-        subject=quiz.subject, 
-        status='approved'
-    ).all()
+    form.questions.data = quiz.questions  # This is a list of question IDs
     
     return render_template("quiz_form.html", form=form, quiz=quiz, available_questions=available_questions)
 
