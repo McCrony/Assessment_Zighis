@@ -183,49 +183,50 @@
 {% endif %}
 
 {% if incomplete_students %}
-<div class="card mb-5">
-    <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #dc3545 0%, #c82333 100%); color: white; border-radius: 16px 16px 0 0 !important;">
-        <h5 class="mb-0"><i class="bi bi-exclamation-triangle"></i> Students with Incomplete Assessments</h5>
-        <button class="btn btn-light btn-sm" onclick="location.reload()">
-            <i class="bi bi-arrow-clockwise"></i> Refresh
-        </button>
+<div class="card mb-5 shadow-sm">
+    <div class="card-header" style="background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%); color: white; border-radius: 16px 16px 0 0 !important;">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h5 class="mb-1"><i class="bi bi-exclamation-triangle-fill"></i> Students Needing Attention</h5>
+                <small>{{ current_user.get_subject_display() if current_user.is_teacher() and current_user.subject else 'All Subjects' }}</small>
+            </div>
+            <div class="text-end">
+                <div class="badge bg-light text-danger fs-6 px-3 py-2">{{ incomplete_students|length }} students</div>
+            </div>
+        </div>
     </div>
     <div class="card-body p-0">
-        <div class="table-responsive">
-            <table class="table table-hover mb-0">
-                <thead>
-                    <tr>
-                        <th>Student</th>
-                        <th>Subject</th>
-                        <th>Missing Categories</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for item in incomplete_students %}
-                    <tr>
-                        <td>
-                            <a href="{{ url_for('student_view', student_id=item.student.id) }}" class="text-decoration-none fw-semibold">
-                                {{ item.student.full_name() }}
+        <div class="row g-0">
+            {% for item in incomplete_students %}
+            <div class="col-lg-6 col-xl-4">
+                <div class="p-3 border-end border-bottom">
+                    <div class="d-flex align-items-start">
+                        <div class="avatar-circle bg-danger text-white me-3 flex-shrink-0">
+                            <i class="bi bi-person-fill"></i>
+                        </div>
+                        <div class="flex-grow-1">
+                            <h6 class="mb-1">
+                                <a href="{{ url_for('student_view', student_id=item.student.id) }}" class="text-decoration-none text-dark fw-semibold">
+                                    {{ item.student.full_name() }}
+                                </a>
+                            </h6>
+                            <p class="text-muted small mb-2">{{ item.student.student_number }}</p>
+                            <div class="mb-2">
+                                <small class="text-muted">Missing:</small>
+                                <div class="d-flex flex-wrap gap-1 mt-1">
+                                    {% for cat in item.missing_categories %}
+                                    <span class="badge bg-danger-subtle text-danger border border-danger">{{ CATEGORY_LABELS.get(cat, cat) }}</span>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <a href="{{ url_for('new_assessment', student_id=item.student.id) }}" class="btn btn-sm btn-outline-danger">
+                                <i class="bi bi-plus-circle"></i> Complete Assessment
                             </a>
-                            <br>
-                            <small class="text-muted">{{ item.student.student_number }}</small>
-                        </td>
-                        <td>{{ item.subject|replace('_', ' ')|title }}</td>
-                        <td>
-                            {% for cat in item.missing_categories %}
-                                <span class="badge bg-danger me-1">{{ CATEGORY_LABELS.get(cat, cat) }}</span>
-                            {% endfor %}
-                        </td>
-                        <td>
-                            <a href="{{ url_for('new_assessment', student_id=item.student.id) }}" class="btn btn-sm btn-outline-success">
-                                <i class="bi bi-plus-circle"></i> Add Assessment
-                            </a>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
         </div>
     </div>
 </div>

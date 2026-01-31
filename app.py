@@ -406,6 +406,11 @@ def dashboard():
     incomplete_students = get_incomplete_assessments()
     affected_students_count = len(incomplete_students)
     
+    # For teachers, filter incomplete assessments to only their subject
+    if hasattr(current_user, 'is_teacher') and current_user.is_teacher() and current_user.subject:
+        incomplete_students = [item for item in incomplete_students if item['subject'] == current_user.subject]
+        affected_students_count = len(incomplete_students)
+    
     # For teachers, show only their assessments and student summaries for their subject
     teacher_student_summaries = None
     if hasattr(current_user, 'is_teacher') and current_user.is_teacher():
