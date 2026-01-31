@@ -28,7 +28,7 @@
                     {% for a in assessments %}
                     <tr>
                         <td><a href="{{ url_for('student_view', student_id=a.student.id) }}">{{ a.student.full_name() }}</a></td>
-                        <td><span class="badge bg-primary">{{ category_labels[a.category] }}</span></td>
+                        <td><span class="badge bg-primary">{{ CATEGORY_LABELS[a.category] }}</span></td>
                         <td>{{ a.subject or '-' }}</td>
                         <td>{{ "%.1f"|format(a.score) }}/{{ "%.0f"|format(a.max_score) }}</td>
                         <td><strong>{{ "%.1f"|format(a.get_percentage()) }}%</strong></td>

@@ -11,7 +11,12 @@
             <div class="col-md-6">
                 <div class="mb-3">
                     {{ form.student_name.label(class="form-label") }}
-                    {{ form.student_name(class="form-select") }}
+                    {% if student_full_name %}
+                        <p class="form-control-plaintext">{{ student_full_name }}</p>
+                        <input type="hidden" name="student_name" value="{{ form.student_name.data }}">
+                    {% else %}
+                        {{ form.student_name(class="form-select") }}
+                    {% endif %}
                     {% for error in form.student_name.errors %}
                         <span class="text-danger">{{ error }}</span>
                     {% endfor %}

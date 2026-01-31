@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+
+{% block title %}Send Messages - EduAssess Pro{% endblock %}
+
+{% block page_title %}Send Messages{% endblock %}
+
+{% block breadcrumbs %}
+<li class="breadcrumb-item"><a href="{{ url_for('dashboard') }}">Dashboard</a></li>
+<li class="breadcrumb-item active">Send Messages</li>
+{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-lg-8 mx-auto">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-envelope me-2"></i>Send Message to Users
+                </h5>
+            </div>
+            <div class="card-body">
+                <form method="POST">
+                    {{ form.hidden_tag() }}
+                    
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label for="recipient_type" class="form-label">Send to</label>
+                            {{ form.recipient_type(class="form-select") }}
+                            {% if form.recipient_type.errors %}
+                                <div class="text-danger small">
+                                    {% for error in form.recipient_type.errors %}{{ error }}{% endfor %}
+                                </div>
+                            {% endif %}
+                        </div>
+                        <div class="col-md-6" id="specific_user_div" style="display: none;">
+                            <label for="recipient_id" class="form-label">Specific User</label>
+                            {{ form.recipient_id(class="form-select") }}
+                        </div>
+                    </div>
+                    
+                    <div class="row mb-3" id="subject_filter_div" style="display: none;">
+                        <div class="col-md-6">
+                            <label for="subject_filter" class="form-label">Subject</label>
+                            {{ form.subject_filter(class="form-select") }}
+                        </div>
+                        <div class="col-md-6" id="class_filter_div" style="display: none;">
+                            <label for="class_filter" class="form-label">Class</label>
+                            {{ form.class_filter(class="form-select") }}
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="subject" class="form-label">Message Subject</label>
+                        {{ form.subject(class="form-control") }}
+                        {% if form.subject.errors %}
+                            <div class="text-danger small">
+                                {% for error in form.subject.errors %}{{ error }}{% endfor %}
+                            </div>
+                        {% endif %}
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="content" class="form-label">Message Content</label>
+                        {{ form.content(class="form-control", rows=6) }}
+                        {% if form.content.errors %}
+                            <div class="text-danger small">
+                                {% for error in form.content.errors %}{{ error }}{% endfor %}
+                            </div>
+                        {% endif %}
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="message_type" class="form-label">Message Type</label>
+                        {{ form.message_type(class="form-select") }}
+                        {% if form.message_type.errors %}
+                            <div class="text-danger small">
+                                {% for error in form.message_type.errors %}{{ error }}{% endfor %}
+                            </div>
+                        {% endif %}
+                    </div>
+                    
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-modern">
+                            <i class="bi bi-send me-2"></i>Send Message
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        
+        <div class="card mt-4">
+            <div class="card-header">
+                <h6 class="card-title mb-0">Recent Messages Sent</h6>
+            </div>
+            <div class="card-body">
+                {% set recent_messages = current_user.sent_messages.order_by(Message.created_at.desc()).limit(5).all() %}
+                {% if recent_messages %}
+                    <div class="list-group list-group-flush">
+                        {% for message in recent_messages %}
+                        <div class="list-group-item px-0">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <h6 class="mb-1">{{ message.subject }}</h6>
+                                    <p class="mb-1 text-muted small">{{ message.content[:100] }}{% if message.content|length > 100 %}...{% endif %}</p>
+                                    <small class="text-muted">
+                                        {% if message.is_broadcast %}
+                                            Broadcast to {{ message.message_type }}
+                                        {% else %}
+                                            To: {{ message.recipient.username }}
+                                        {% endif %}
+                                        • {{ message.created_at.strftime('%Y-%m-%d %H:%M') }}
+                                    </small>
+                                </div>
+                                <span class="badge bg-{{ 'success' if message.message_type == 'notification' else 'warning' if message.message_type == 'update' else 'danger' }}">
+                                    {{ message.message_type.title() }}
+                                </span>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="text-muted mb-0">No messages sent yet.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Show/hide form fields based on recipient type
+document.getElementById('recipient_type').addEventListener('change', function() {
+    const recipientType = this.value;
+    const specificUserDiv = document.getElementById('specific_user_div');
+    const subjectFilterDiv = document.getElementById('subject_filter_div');
+    const classFilterDiv = document.getElementById('class_filter_div');
+    
+    // Hide all first
+    specificUserDiv.style.display = 'none';
+    subjectFilterDiv.style.display = 'none';
+    classFilterDiv.style.display = 'none';
+    
+    if (recipientType === 'specific_user') {
+        specificUserDiv.style.display = 'block';
+    } else if (recipientType === 'subject_students') {
+        subjectFilterDiv.style.display = 'block';
+    } else if (recipientType === 'class_students') {
+        classFilterDiv.style.display = 'block';
+    }
+});
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('recipient_type').dispatchEvent(new Event('change'));
+});
+</script>
+{% endblock %}

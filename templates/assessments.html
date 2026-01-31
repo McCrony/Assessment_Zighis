@@ -1,45 +1,220 @@
 {% extends "base.html" %}
-{% block title %}Assessments{% endblock %}
+{% block title %}Student Assessments - EduAssess Module{% endblock %}
 {% block content %}
-<div class="container mt-4">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2><i class="bi bi-clipboard-data"></i> {% if archived %}Archived {% endif %}Assessments</h2>
-        <div>
-            {% if not archived and (current_user.is_admin() or current_user.is_teacher()) %}
-            <a href="{{ url_for('assessments_archived') }}" class="btn btn-outline-secondary me-2">
-                <i class="bi bi-archive"></i> View Archived
-            </a>
-            {% endif %}
-            {% if current_user.is_admin() or current_user.is_teacher() %}
-            <a href="{{ url_for('new_assessment') }}" class="btn btn-primary">
-                <i class="bi bi-plus-circle"></i> New Assessment
-            </a>
-            {% endif %}
+<div class="container-fluid">
+    <!-- Header -->
+    <div class="row mb-4">
+        <div class="col-md-12">
+            <div class="d-flex justify-content-between align-items-center">
+                <h2><i class="bi bi-clipboard-data"></i> Student Assessments</h2>
+                <div>
+                    {% if not archived and (current_user.is_admin() or current_user.is_teacher()) %}
+                    <a href="{{ url_for('assessments_archived') }}" class="btn btn-outline-secondary me-2">
+                        <i class="bi bi-archive"></i> View Archived
+                    </a>
+                    {% endif %}
+                    {% if current_user.is_admin() or current_user.is_teacher() %}
+                    <a href="{{ url_for('new_assessment') }}" class="btn btn-primary">
+                        <i class="bi bi-plus-circle"></i> New Assessment
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
         </div>
     </div>
 
-    <!-- Filter Form (if you have one) -->
-    {% if form %}
-    <div class="card mb-3">
-        <div class="card-body">
-            <form method="GET" class="row g-2">
-                <div class="col-md-3">
-                    {{ form.subject.label(class="form-label") }}
-                    {{ form.subject(class="form-select") }}
+    <!-- Assessment Filters -->
+    <div class="row mb-4">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header" style="background: var(--gradient-secondary); color: white;">
+                    <h5 class="mb-0"><i class="bi bi-funnel-fill"></i> Filter Assessments</h5>
                 </div>
-                <div class="col-md-3">
-                    {{ form.class_name.label(class="form-label") }}
-                    {{ form.class_name(class="form-select") }}
+                <div class="card-body">
+                    <form method="GET" class="row g-3">
+                        <div class="col-md-3">
+                            <label class="form-label fw-semibold">Subject</label>
+                            {{ form.subject(class="form-select") }}
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label fw-semibold">Class</label>
+                            {{ form.class_name(class="form-select") }}
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label fw-semibold">Category</label>
+                            {{ form.category(class="form-select") }}
+                        </div>
+                        <div class="col-md-3 d-flex align-items-end">
+                            <button type="submit" class="btn btn-outline-primary me-2">
+                                <i class="bi bi-search"></i> Filter
+                            </button>
+                            <a href="{{ url_for('assessments_list') }}" class="btn btn-outline-secondary">
+                                <i class="bi bi-x-circle"></i> Clear
+                            </a>
+                        </div>
+                    </form>
                 </div>
-                <div class="col-md-3">
-                    {{ form.category.label(class="form-label") }}
-                    {{ form.category(class="form-select") }}
+            </div>
+        </div>
+    </div>
+
+    <!-- Metrics Cards for Filtered Assessments -->
+    {% if subject_filter and student_performance %}
+    <div class="row mb-4">
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card stat-card success h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-clipboard-check-fill fs-1 text-success mb-3"></i>
+                    <h3 class="fw-bold">{{ student_performance|length }}</h3>
+                    <p class="text-muted mb-0">Students in {{ subject_filter }}</p>
                 </div>
-                <div class="col-md-3 d-flex align-items-end">
-                    <button type="submit" class="btn btn-outline-primary me-2">Filter</button>
-                    <a href="{{ url_for('assessments_list') }}" class="btn btn-outline-secondary">Reset</a>
+            </div>
+        </div>
+                <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card stat-card h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-trophy-fill fs-1 text-primary mb-3"></i>
+                    <h3 class="fw-bold">{{ "%.1f"|format(student_performance[0]['final_percent'] if student_performance else 0) }}%</h3>
+                    <p class="text-muted mb-0">Top Score</p>
                 </div>
-            </form>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card stat-card warning h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-graph-up-arrow fs-1 text-warning mb-3"></i>
+                    <h3 class="fw-bold">{{ "%.1f"|format(student_performance[0]['gpa'] if student_performance else 0) }}</h3>
+                    <p class="text-muted mb-0">Top GPA</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card stat-card info h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-people-fill fs-1 text-info mb-3"></i>
+                    <h3 class="fw-bold">{{ unique_students }}</h3>
+                    <p class="text-muted mb-0">Total Students</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Student Performance Cards for Subject Filter -->
+    {% if subject_filter and student_performance %}
+    <div class="row mb-4">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Student Performance in {{ subject_filter }}</h5>
+                    <div class="row">
+                        {% for student_data in student_performance %}
+                        <div class="col-md-6 col-lg-4 mb-3">
+                            <div class="card border-primary">
+                                <div class="card-body text-center">
+                                    <h6 class="card-title">{{ student_data['student'].full_name() }}</h6>
+                                    <small class="text-muted">{{ student_data['student'].student_number }} | {{ student_data['student'].class_name or 'N/A' }}</small>
+                                    <div class="mb-2 mt-2">
+                                        {% if student_data['grade'] == 'A1' %}
+                                            <div class="bg-success text-white rounded-circle d-flex align-items-center justify-content-center mx-auto" style="width: 80px; height: 80px; font-size: 1.2rem; font-weight: bold;">
+                                                {{ "%.1f"|format(student_data['final_percent']) }}%
+                                            </div>
+                                        {% elif student_data['grade'] in ['B2'] %}
+                                            <div class="text-white rounded-circle d-flex align-items-center justify-content-center mx-auto" style="width: 80px; height: 80px; font-size: 1.2rem; font-weight: bold; background-color: #28a745;">
+                                                {{ "%.1f"|format(student_data['final_percent']) }}%
+                                            </div>
+                                        {% elif student_data['grade'] == 'B3' %}
+                                            <div class="text-dark rounded-circle d-flex align-items-center justify-content-center mx-auto" style="width: 80px; height: 80px; font-size: 1.2rem; font-weight: bold; background-color: #f0e68c;">
+                                                {{ "%.1f"|format(student_data['final_percent']) }}%
+                                            </div>
+                                        {% elif student_data['grade'] == 'C4' %}
+                                            <div class="text-dark rounded-circle d-flex align-items-center justify-content-center mx-auto" style="width: 80px; height: 80px; font-size: 1.2rem; font-weight: bold; background-color: #ffd700;">
+                                                {{ "%.1f"|format(student_data['final_percent']) }}%
+                                            </div>
+                                        {% elif student_data['grade'] == 'C5' %}
+                                            <div class="text-dark rounded-circle d-flex align-items-center justify-content-center mx-auto" style="width: 80px; height: 80px; font-size: 1.2rem; font-weight: bold; background-color: #ffff00;">
+                                                {{ "%.1f"|format(student_data['final_percent']) }}%
+                                            </div>
+                                        {% elif student_data['grade'] == 'C6' %}
+                                            <div class="text-white rounded-circle d-flex align-items-center justify-content-center mx-auto" style="width: 80px; height: 80px; font-size: 1.2rem; font-weight: bold; background-color: #ffa500;">
+                                                {{ "%.1f"|format(student_data['final_percent']) }}%
+                                            </div>
+                                        {% elif student_data['grade'] == 'D7' %}
+                                            <div class="text-white rounded-circle d-flex align-items-center justify-content-center mx-auto" style="width: 80px; height: 80px; font-size: 1.2rem; font-weight: bold; background-color: #ff8c00;">
+                                                {{ "%.1f"|format(student_data['final_percent']) }}%
+                                            </div>
+                                        {% elif student_data['grade'] == 'E8' %}
+                                            <div class="text-white rounded-circle d-flex align-items-center justify-content-center mx-auto" style="width: 80px; height: 80px; font-size: 1.2rem; font-weight: bold; background-color: #dc3545;">
+                                                {{ "%.1f"|format(student_data['final_percent']) }}%
+                                            </div>
+                                        {% else %}
+                                            <div class="bg-danger text-white rounded-circle d-flex align-items-center justify-content-center mx-auto" style="width: 80px; height: 80px; font-size: 1.2rem; font-weight: bold;">
+                                                {{ "%.1f"|format(student_data['final_percent']) }}%
+                                            </div>
+                                        {% endif %}
+                                    </div>
+                                    <div class="mt-2">
+                                        <div class="mb-1">
+                                            <span class="badge 
+                                                {% if student_data['grade'] == 'A1' %}bg-success
+                                                {% elif student_data['grade'] in ['B2', 'B3'] %}bg-success
+                                                {% elif student_data['grade'] in ['C4', 'C5', 'C6'] %}bg-warning
+                                                {% elif student_data['grade'] == 'D7' %}bg-warning
+                                                {% elif student_data['grade'] == 'E8' %}bg-danger
+                                                {% else %}bg-secondary{% endif %} 
+                                                fw-bold px-2 py-1">
+                                                Grade: {{ student_data['grade'] }}
+                                            </span>
+                                        </div>
+                                        <small class="text-muted">GPA: {{ "%.1f"|format(student_data['gpa']) }} | {{ student_data['assessment_count'] }} assessments</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+    
+    {% elif assessments %}
+    <div class="row mb-4">
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card stat-card success h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-clipboard-check-fill fs-1 text-success mb-3"></i>
+                    <h3 class="fw-bold">{{ assessments|length }}</h3>
+                    <p class="text-muted mb-0">Filtered Assessments</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card stat-card h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-trophy-fill fs-1 text-primary mb-3"></i>
+                    <h3 class="fw-bold">{{ "%.1f"|format(avg_score) }}%</h3>
+                    <p class="text-muted mb-0">Average Score</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card stat-card warning h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-graph-up-arrow fs-1 text-warning mb-3"></i>
+                    <h3 class="fw-bold">{{ "%.1f"|format(avg_gpa) }}</h3>
+                    <p class="text-muted mb-0">Average GPA</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 mb-3">
+            <div class="card stat-card info h-100">
+                <div class="card-body text-center">
+                    <i class="bi bi-people-fill fs-1 text-info mb-3"></i>
+                    <h3 class="fw-bold">{{ unique_students }}</h3>
+                    <p class="text-muted mb-0">Students Affected</p>
+                </div>
+            </div>
         </div>
     </div>
     {% endif %}
@@ -72,8 +247,8 @@
                             </td>
                             <td>
                                 <span class="badge bg-primary">
-                                    {% if category_labels and a.category in category_labels %}
-                                        {{ category_labels[a.category] }}
+                                    {% if CATEGORY_LABELS and a.category in CATEGORY_LABELS %}
+                                        {{ CATEGORY_LABELS[a.category] }}
                                     {% else %}
                                         {{ a.category or 'N/A' }}
                                     {% endif %}
