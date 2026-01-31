@@ -113,7 +113,7 @@ init_db(app, bcrypt)
 app.config['SESSION_TYPE'] = 'filesystem'  # Can be changed to 'redis' for production
 app.config['SESSION_FILE_DIR'] = os.path.join(os.path.dirname(__file__), 'flask_sessions')
 app.config['SESSION_PERMANENT'] = False
-app.config['SESSION_USE_SIGNER'] = True
+app.config['SESSION_USE_SIGNER'] = False
 Session(app)
 
 # Create necessary folders
