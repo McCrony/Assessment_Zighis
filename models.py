@@ -154,6 +154,20 @@ class Student(UserMixin, db.Model):
         order_by="Assessment.date_recorded.desc()"
     )
     
+    question_attempts = db.relationship(
+        "QuestionAttempt",
+        backref="student",
+        cascade="all, delete-orphan",
+        lazy=True
+    )
+    
+    quiz_attempts = db.relationship(
+        "QuizAttempt", 
+        backref="student",
+        cascade="all, delete-orphan",
+        lazy=True
+    )
+    
     def full_name(self):
         """Return full name of student"""
         if self.middle_name:
@@ -465,7 +479,6 @@ class QuestionAttempt(db.Model):
     time_taken = db.Column(db.Integer, nullable=True)  # Time in seconds
     
     # Relationships
-    student = db.relationship("Student", backref="question_attempts")
     question = db.relationship("Question", backref="attempts")
     
     def __repr__(self):
@@ -513,7 +526,6 @@ class QuizAttempt(db.Model):
     remaining_time = db.Column(db.Integer, nullable=True)  # Remaining time in seconds
     
     # Relationships
-    student = db.relationship("Student", backref="quiz_attempts")
     quiz = db.relationship("Quiz", backref="attempts")
     
     def get_percentage(self):
