@@ -8,23 +8,80 @@ from template_updater import AssessmentTemplateUpdater
 import io
 import csv
 import random
+import time
 from functools import wraps
 from werkzeug.utils import secure_filename
 from datetime import datetime
 
-from flask import Flask, render_template, redirect, url_for, flash, request, send_file, abort, jsonify
+from flask import Flask, render_template, redirect, url_for, flash, request, send_file, abort, jsonify, session
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from flask_bcrypt import Bcrypt
 from flask_wtf import FlaskForm
 from flask_wtf.file import FileField, FileAllowed
-from wtforms import StringField, PasswordField, FloatField, SelectField, DateField, TextAreaField, BooleanField
+from flask_session import Session
+from wtforms import StringField, PasswordField, FloatField, SelectField, SelectMultipleField, DateField, TextAreaField, BooleanField
 from wtforms.validators import InputRequired, Length, Optional, NumberRange
 
 from config import config
-from models import User, Student, Assessment, Setting, init_db
-from excel_utils import ExcelTemplateHandler, ExcelBulkImporter, create_default_template
 
-# -------------------------
+# Define category labels for easy access
+CATEGORY_LABELS = {
+    'ica1': 'Individual Assessment 1',
+    'ica2': 'Individual Assessment 2',
+    'icp1': 'Individual Class Project 1',
+    'icp2': 'Individual Class Project 2',
+    'gp1': 'Group Project/Research 1',
+    'gp2': 'Group Project/Research 2',
+    'practical': 'Practical Portfolio',
+    'mid_term': 'Mid-Semester Exam',
+    'end_term': 'End of Term Exam'
+}
+from models import User, Student, Assessment, Setting, ActivityLog, Question, QuestionAttempt, Quiz, QuizAttempt, init_db
+from excel_utils import ExcelTemplateHandler, ExcelBulkImporter, StudentBulkImporter, QuestionBulkImporter, create_default_template, create_student_import_template, create_question_import_template
+
+def get_incomplete_assessments():
+    """Get students with incomplete assessments"""
+    required_categories = ['ica1', 'ica2', 'icp1', 'icp2', 'gp1', 'gp2', 'practical', 'mid_term', 'end_term']
+    
+    # Get all students with assessments
+    students_with_assessments = db.session.query(Student).join(Assessment)\
+        .filter(Assessment.archived == False)\
+        .distinct().all()
+    
+    incomplete_students = []
+    
+    for student in students_with_assessments:
+        # Get all subjects this student has assessments in
+        subjects = db.session.query(Assessment.subject)\
+            .filter(Assessment.student_id == student.id)\
+            .filter(Assessment.archived == False)\
+            .distinct().all()
+        
+        subjects = [s[0] for s in subjects]
+        
+        for subject in subjects:
+            # Get existing categories for this subject
+            existing_categories = db.session.query(Assessment.category)\
+                .filter(Assessment.student_id == student.id)\
+                .filter(Assessment.subject == subject)\
+                .filter(Assessment.archived == False)\
+                .distinct().all()
+            
+            existing_categories = [c[0] for c in existing_categories]
+            
+            # Find missing categories
+            missing_categories = [cat for cat in required_categories if cat not in existing_categories]
+            
+            if missing_categories:
+                incomplete_students.append({
+                    'student': student,
+                    'subject': subject,
+                    'missing_categories': missing_categories,
+                    'existing_categories': existing_categories
+                })
+    
+    return incomplete_students
+
 # Application Factory
 # -------------------------
 app = Flask(__name__, static_folder='public')
@@ -52,6 +109,39 @@ login_manager.login_view = "login"
 # Initialize database
 init_db(app, bcrypt)
 
+# Configure session for multi-worker support
+app.config['SESSION_TYPE'] = 'filesystem'  # Can be changed to 'redis' for production
+app.config['SESSION_FILE_DIR'] = os.path.join(os.path.dirname(__file__), 'flask_sessions')
+app.config['SESSION_PERMANENT'] = False
+app.config['SESSION_USE_SIGNER'] = True
+Session(app)
+
+# Create necessary folders
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['TEMPLATE_FOLDER'], exist_ok=True)
+os.makedirs(app.config['SESSION_FILE_DIR'], exist_ok=True)
+# Activity Logging
+# -------------------------
+def log_activity(user, action, details=None):
+    """Log user activity for auditing purposes"""
+    if not user or not user.is_authenticated:
+        return
+    try:
+        ip_address = request.remote_addr if request else None
+        log_entry = ActivityLog(
+            user_id=user.id,
+            action=action,
+            details=details,
+            ip_address=ip_address
+        )
+        db.session.add(log_entry)
+        db.session.commit()
+    except Exception as e:
+        # Log to console if database logging fails
+        print(f"Failed to log activity: {e}")
+
+# -------------------------
+# Forms - FIXED: Remove duplicate definitions
 # -------------------------
 # Forms - FIXED: Remove duplicate definitions
 # -------------------------
@@ -69,12 +159,12 @@ class UserForm(FlaskForm):
     password = PasswordField("Password", validators=[InputRequired(), Length(min=6)])
     role = SelectField("Role", choices=app.config['USER_ROLES'])
     subject = SelectField("Subject (for teachers)", choices=[("", "-- Not Applicable --")] + app.config['LEARNING_AREAS'], validators=[Optional()])
-    class_name = SelectField("Class (for teachers)", choices=[("", "-- Not Applicable --")] + app.config['CLASS_LEVELS'], validators=[Optional()])
+    classes = SelectMultipleField("Classes (for teachers)", choices=app.config['CLASS_LEVELS'], validators=[Optional()])
 
 class EditUserForm(FlaskForm):
     role = SelectField("Role", choices=app.config['USER_ROLES'])
     subject = SelectField("Subject (for teachers)", choices=[("", "-- Not Applicable --")] + app.config['LEARNING_AREAS'], validators=[Optional()])
-    class_name = SelectField("Class (for teachers)", choices=[("", "-- Not Applicable --")] + app.config['CLASS_LEVELS'], validators=[Optional()])
+    classes = SelectMultipleField("Classes (for teachers)", choices=app.config['CLASS_LEVELS'], validators=[Optional()])
 
 class PasswordResetForm(FlaskForm):
     password = PasswordField("New Password", validators=[InputRequired(), Length(min=6)])
@@ -106,7 +196,7 @@ class AssessmentForm(FlaskForm):
 
 class TeacherAssignmentForm(FlaskForm):
     subject = SelectField("Subject", choices=[("", "-- Select Subject --")] + app.config['LEARNING_AREAS'], validators=[InputRequired()])
-    class_name = SelectField("Class", choices=[("", "-- Select Class --")] + app.config['CLASS_LEVELS'], validators=[Optional()])
+    classes = SelectMultipleField("Classes", choices=app.config['CLASS_LEVELS'], validators=[Optional()])
 
 class AssessmentFilterForm(FlaskForm):
     subject = SelectField("Subject", choices=[("", "-- All Subjects --")] + app.config['LEARNING_AREAS'], validators=[Optional()])
@@ -119,11 +209,56 @@ class BulkImportForm(FlaskForm):
         FileAllowed(['xlsx', 'xls'], 'Excel files only!')
     ])
 
+class StudentBulkImportForm(FlaskForm):
+    excel_file = FileField("Excel File", validators=[
+        InputRequired(),
+        FileAllowed(['xlsx', 'xls'], 'Excel files only!')
+    ])
+
+class QuestionBulkImportForm(FlaskForm):
+    excel_file = FileField("Excel File", validators=[
+        InputRequired(),
+        FileAllowed(['xlsx', 'xls'], 'Excel files only!')
+    ])
+
 class SettingsForm(FlaskForm):
     current_term = SelectField("Current Term", choices=app.config['TERMS'], validators=[InputRequired()])
     current_academic_year = StringField("Current Academic Year", validators=[InputRequired()])
     current_session = StringField("Current Session", validators=[InputRequired()])
     assessment_active = BooleanField("Assessment Entry Active", default=True)
+
+
+class QuestionForm(FlaskForm):
+    question_text = TextAreaField("Question Text", validators=[InputRequired(), Length(min=10, max=1000)])
+    question_type = SelectField("Question Type", choices=[
+        ('mcq', 'Multiple Choice Question'),
+        ('true_false', 'True/False'),
+        ('short_answer', 'Short Answer')
+    ], validators=[InputRequired()])
+    options = TextAreaField("Options (for MCQ only)", validators=[Optional()], 
+                          render_kw={"placeholder": "Enter options one per line (A, B, C, D)"})
+    correct_answer = StringField("Correct Answer", validators=[InputRequired()], 
+                               render_kw={"placeholder": "For MCQ: A, B, C, or D. For True/False: True or False. For Short Answer: the expected answer"})
+    marks = FloatField("Marks", validators=[InputRequired(), NumberRange(min=0.1, max=100)], default=1.0)
+    keywords = TextAreaField("Keywords (for Short Answer only)", validators=[Optional()], 
+                           render_kw={"placeholder": "Enter keywords one per line for flexible marking"})
+    difficulty = SelectField("Difficulty", choices=[
+        ('easy', 'Easy'),
+        ('medium', 'Medium'),
+        ('hard', 'Hard')
+    ], validators=[InputRequired()])
+    explanation = TextAreaField("Explanation (Optional)", validators=[Optional(), Length(max=500)])
+
+
+class QuizForm(FlaskForm):
+    title = StringField("Quiz Title", validators=[InputRequired(), Length(min=3, max=200)])
+    subject = SelectField("Subject", validators=[InputRequired()])
+    description = TextAreaField("Description", validators=[Optional(), Length(max=500)])
+    questions = SelectMultipleField("Questions", validators=[InputRequired()], 
+                                   render_kw={"size": 10})
+    time_limit = FloatField("Time Limit (minutes)", validators=[Optional(), NumberRange(min=1, max=180)])
+    is_active = BooleanField("Active", default=True)
+
 
 # -------------------------
 # Login manager
@@ -164,6 +299,27 @@ def student_required(f):
 # -------------------------
 # Authentication Routes
 # -------------------------
+@app.route("/api/live-data")
+@login_required
+def live_data():
+    """API endpoint for live dashboard data"""
+    if hasattr(current_user, 'is_student') and current_user.is_student():
+        return jsonify({"error": "Access denied"}), 403
+    
+    student_count = Student.query.count()
+    assessment_count = Assessment.query.filter_by(archived=False).count()
+    users_count = User.query.count()
+    incomplete_students = get_incomplete_assessments()
+    affected_students_count = len(incomplete_students)
+    
+    return jsonify({
+        "student_count": student_count,
+        "assessment_count": assessment_count,
+        "users_count": users_count,
+        "affected_students_count": affected_students_count,
+        "incomplete_students_count": len(incomplete_students)
+    })
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if current_user.is_authenticated:
@@ -174,6 +330,7 @@ def login():
         user = User.query.filter_by(username=form.username.data.strip()).first()
         if user and user.check_password(form.password.data, bcrypt):
             login_user(user)
+            log_activity(user, "login", f"User {user.username} logged in")
             flash("Logged in successfully", "success")
             next_page = request.args.get("next")
             return redirect(next_page or url_for("dashboard"))
@@ -190,8 +347,6 @@ def logout():
 @app.route("/student/login", methods=["GET", "POST"])
 def student_login():
     """Student login using first name and student number"""
-    if current_user.is_authenticated:
-        return redirect(url_for("dashboard"))
     
     form = StudentLoginForm()
     if form.validate_on_submit():
@@ -217,6 +372,7 @@ def student_login():
                 db.session.commit()
             
             login_user(user)
+            log_activity(user, "student_login", f"Student {student.full_name()} ({student.student_number}) logged in")
             flash("Student login successful", "success")
             return redirect(url_for("student_dashboard"))
         else:
@@ -246,10 +402,73 @@ def dashboard():
     assessment_count = Assessment.query.filter_by(archived=False).count()
     users_count = User.query.count()
     
-    # For teachers, show only their assessments
+    # Get incomplete assessments data
+    incomplete_students = get_incomplete_assessments()
+    affected_students_count = len(incomplete_students)
+    
+    # For teachers, show only their assessments and student summaries for their subject
+    teacher_student_summaries = None
     if hasattr(current_user, 'is_teacher') and current_user.is_teacher():
         recent = Assessment.query.filter_by(teacher_id=current_user.id, archived=False)\
             .order_by(Assessment.date_recorded.desc()).limit(8).all()
+        
+        # Get student summaries for teacher's subject
+        if current_user.subject:
+            # Get all students who have assessments in teacher's subject by this teacher
+            students_with_assessments = db.session.query(Student).join(Assessment)\
+                .filter(Assessment.teacher_id == current_user.id)\
+                .filter(Assessment.subject == current_user.subject)\
+                .filter(Assessment.archived == False)\
+                .distinct().all()
+            
+            teacher_student_summaries = []
+            for student in students_with_assessments:
+                final_grade = student.calculate_final_grade(subject=current_user.subject, teacher_id=current_user.id)
+                assessment_count = len([a for a in student.assessments 
+                                      if a.teacher_id == current_user.id and a.subject == current_user.subject and not a.archived])
+                
+                # Calculate GPA and grade
+                gpa = None
+                grade = None
+                if final_grade is not None:
+                    if final_grade >= 80:
+                        gpa = 4.0
+                        grade = 'A1'
+                    elif final_grade >= 70:
+                        gpa = 3.5
+                        grade = 'B2'
+                    elif final_grade >= 65:
+                        gpa = 3.0
+                        grade = 'B3'
+                    elif final_grade >= 60:
+                        gpa = 2.5
+                        grade = 'C4'
+                    elif final_grade >= 55:
+                        gpa = 2.0
+                        grade = 'C5'
+                    elif final_grade >= 50:
+                        gpa = 1.5
+                        grade = 'C6'
+                    elif final_grade >= 45:
+                        gpa = 1.0
+                        grade = 'D7'
+                    elif final_grade >= 40:
+                        gpa = 0.5
+                        grade = 'E8'
+                    else:
+                        gpa = 0.0
+                        grade = 'F9'
+                
+                teacher_student_summaries.append({
+                    'student': student,
+                    'final_grade': final_grade,
+                    'gpa': gpa,
+                    'grade': grade,
+                    'assessment_count': assessment_count
+                })
+            
+            # Sort by final grade descending
+            teacher_student_summaries.sort(key=lambda x: x['final_grade'] or 0, reverse=True)
     else:
         recent = Assessment.query.filter_by(archived=False)\
             .order_by(Assessment.date_recorded.desc()).limit(8).all()
@@ -259,7 +478,10 @@ def dashboard():
         student_count=student_count,
         assessment_count=assessment_count,
         users_count=users_count,
-        recent=recent
+        affected_students_count=affected_students_count,
+        incomplete_students=incomplete_students,
+        recent=recent,
+        teacher_student_summaries=teacher_student_summaries
     )
 
 @app.route("/student/dashboard")
@@ -276,6 +498,7 @@ def student_dashboard():
     # Get filter parameters
     subject = request.args.get("subject", "")
     class_filter = request.args.get("class", "")
+    category = request.args.get("category", "")
     
     # Get assessments
     query = Assessment.query.filter_by(student_id=student.id, archived=False)
@@ -284,17 +507,183 @@ def student_dashboard():
         query = query.filter_by(subject=subject)
     if class_filter:
         query = query.filter_by(class_name=class_filter)
+    if category:
+        query = query.filter_by(category=category)
     
     assessments = query.order_by(Assessment.date_recorded.desc()).all()
     
     # Get unique subjects and classes for filter dropdowns
     subjects = sorted(set([a.subject for a in student.assessments if a.subject]))
     classes = sorted(set([a.class_name for a in student.assessments if a.class_name]))
+    categories = sorted(set([a.category for a in student.assessments if a.category]))
     
-    # Calculate summary
+    # Get quiz attempts for this student
+    quiz_attempts = QuizAttempt.query.filter_by(student_id=student.id).order_by(QuizAttempt.completed_at.desc()).all()
+    
+    # Get quiz details for each attempt
+    quiz_details = {}
+    for attempt in quiz_attempts:
+        quiz = Quiz.query.get(attempt.quiz_id)
+        if quiz:
+            quiz_details[attempt.id] = quiz
+    
+    # Get results grouped by teacher/subject instead of aggregated totals
+    # Respect the subject filter - only show filtered subjects or all if no filter
+    assessments_for_results = student.assessments
+    if subject:
+        assessments_for_results = [a for a in assessments_for_results if a.subject == subject]
+    
+    teacher_subjects = {}
+    
+    # Group assessments by teacher and subject
+    for assessment in assessments_for_results:
+        if assessment.archived:
+            continue
+            
+        teacher_id = assessment.teacher_id
+        subject_name = assessment.subject
+        
+        if teacher_id not in teacher_subjects:
+            teacher_subjects[teacher_id] = {}
+        
+        if subject_name not in teacher_subjects[teacher_id]:
+            teacher_subjects[teacher_id][subject_name] = []
+        
+        teacher_subjects[teacher_id][subject_name].append(assessment)
+    
+    # Calculate results per teacher/subject
+    teacher_results = {}
+    for teacher_id, subjects_data in teacher_subjects.items():
+        teacher = User.query.get(teacher_id)
+        teacher_name = teacher.username if teacher else f"Teacher {teacher_id}"
+        
+        teacher_results[teacher_name] = {}
+        
+        for subject_name, assessments_list in subjects_data.items():
+            # Calculate final grade for this teacher/subject combination
+            final_percent = student.calculate_final_grade(subject=subject_name, teacher_id=teacher_id)
+            
+            # Calculate GPA and grade based on this final percentage
+            gpa = None
+            grade = None
+            if final_percent is not None:
+                if final_percent >= 80:
+                    gpa = 4.0
+                    grade = 'A1'
+                elif final_percent >= 70:
+                    gpa = 3.5
+                    grade = 'B2'
+                elif final_percent >= 65:
+                    gpa = 3.0
+                    grade = 'B3'
+                elif final_percent >= 60:
+                    gpa = 2.5
+                    grade = 'C4'
+                elif final_percent >= 55:
+                    gpa = 2.0
+                    grade = 'C5'
+                elif final_percent >= 50:
+                    gpa = 1.5
+                    grade = 'C6'
+                elif final_percent >= 45:
+                    gpa = 1.0
+                    grade = 'D7'
+                elif final_percent >= 40:
+                    gpa = 0.5
+                    grade = 'E8'
+                else:
+                    gpa = 0.0
+                    grade = 'F9'
+            
+            teacher_results[teacher_name][subject_name] = {
+                'final_percent': final_percent,
+                'gpa': gpa,
+                'grade': grade,
+                'assessments': assessments_list
+            }
+    
+    # Overall summary (keeping for backward compatibility, but not displayed prominently)
     summary = student.get_assessment_summary()
     final_percent = student.calculate_final_grade()
     gpa_grade = student.get_gpa_and_grade()
+    
+    # Calculate filtered summary
+    filtered_assessments = assessments  # assessments is already filtered
+    if subject:
+        # Specific subject selected - show final grade for that subject
+        final_percent_filtered = student.calculate_final_grade(subject=subject, teacher_id=current_user.id if current_user.is_teacher() else None)
+        average_score = final_percent_filtered if final_percent_filtered is not None else 0.0
+        # GPA and grade based on this subject's final grade
+        if final_percent_filtered is not None:
+            if final_percent_filtered >= 80:
+                filtered_gpa = 4.0
+                filtered_grade = 'A1'
+            elif final_percent_filtered >= 70:
+                filtered_gpa = 3.5
+                filtered_grade = 'B2'
+            elif final_percent_filtered >= 65:
+                filtered_gpa = 3.0
+                filtered_grade = 'B3'
+            elif final_percent_filtered >= 60:
+                filtered_gpa = 2.5
+                filtered_grade = 'C4'
+            elif final_percent_filtered >= 55:
+                filtered_gpa = 2.0
+                filtered_grade = 'C5'
+            elif final_percent_filtered >= 50:
+                filtered_gpa = 1.5
+                filtered_grade = 'C6'
+            elif final_percent_filtered >= 45:
+                filtered_gpa = 1.0
+                filtered_grade = 'D7'
+            elif final_percent_filtered >= 40:
+                filtered_gpa = 0.5
+                filtered_grade = 'E8'
+            else:
+                filtered_gpa = 0.0
+                filtered_grade = 'F9'
+        else:
+            filtered_gpa = 0.0
+            filtered_grade = 'N/A'
+    else:
+        # All subjects - calculate average score from all assessments
+        if filtered_assessments:
+            total_marks = sum(a.max_score for a in filtered_assessments if a.max_score)
+            obtained_marks = sum(a.score for a in filtered_assessments if a.score)
+            average_score = (obtained_marks / total_marks * 100) if total_marks > 0 else 0.0
+            
+            # GPA and grade based on average score
+            if average_score >= 80:
+                filtered_gpa = 4.0
+                filtered_grade = 'A1'
+            elif average_score >= 70:
+                filtered_gpa = 3.5
+                filtered_grade = 'B2'
+            elif average_score >= 65:
+                filtered_gpa = 3.0
+                filtered_grade = 'B3'
+            elif average_score >= 60:
+                filtered_gpa = 2.5
+                filtered_grade = 'C4'
+            elif average_score >= 55:
+                filtered_gpa = 2.0
+                filtered_grade = 'C5'
+            elif average_score >= 50:
+                filtered_gpa = 1.5
+                filtered_grade = 'C6'
+            elif average_score >= 45:
+                filtered_gpa = 1.0
+                filtered_grade = 'D7'
+            elif average_score >= 40:
+                filtered_gpa = 0.5
+                filtered_grade = 'E8'
+            else:
+                filtered_gpa = 0.0
+                filtered_grade = 'F9'
+        else:
+            average_score = 0.0
+            filtered_gpa = 0.0
+            filtered_grade = 'N/A'
     
     # Calculate comment based on GPA
     def get_comment(gpa_str):
@@ -318,15 +707,22 @@ def student_dashboard():
         "student_dashboard.html",
         student=student,
         assessments=assessments,
+        teacher_results=teacher_results,
         summary=summary,
         final_percent=final_percent,
         gpa_grade=gpa_grade,
         comment=comment,
         subjects=subjects,
         classes=classes,
+        categories=categories,
         selected_subject=subject,
         selected_class=class_filter,
-        category_labels=app.config['CATEGORY_LABELS']
+        selected_category=category,
+        average_score=average_score,
+        filtered_gpa=filtered_gpa,
+        filtered_grade=filtered_grade,
+        quiz_attempts=quiz_attempts,
+        quiz_details=quiz_details
     )
 
 # -------------------------
@@ -377,17 +773,7 @@ def student_new():
             db.session.add(student)
             db.session.commit()
             
-            # Create student user account
-            password = app.config['DEFAULT_STUDENT_PASSWORD']
-            pw_hash = bcrypt.generate_password_hash(password).decode("utf-8")
-            user = User(
-                username=reference_number,
-                password_hash=pw_hash,
-                role="student"
-            )
-            db.session.add(user)
-            db.session.commit()
-            
+            log_activity(current_user, "create_student", f"Created student {student.full_name()} ({student.student_number})")
             flash(f"Student {student.full_name()} added successfully. Reference Number: {reference_number}", "success")
             return redirect(url_for("students"))
     
@@ -411,6 +797,7 @@ def student_edit(student_id):
         student.class_name = form.class_name.data if form.class_name.data else None
         student.study_area = form.study_area.data if form.study_area.data else None
         db.session.commit()
+        log_activity(current_user, "edit_student", f"Edited student {student.full_name()} ({student.student_number})")
         flash(f"Student {student.full_name()} updated successfully", "success")
         return redirect(url_for("students"))
     
@@ -424,6 +811,7 @@ def student_delete(student_id):
     student_name = student.full_name()
     db.session.delete(student)
     db.session.commit()
+    log_activity(current_user, "delete_student", f"Deleted student {student_name} ({student.student_number})")
     flash(f"Student {student_name} deleted successfully", "info")
     return redirect(url_for("students"))
 
@@ -438,18 +826,26 @@ def student_view(student_id):
     if subject:
         assessments = [a for a in student.assessments if a.subject == subject]
     else:
-        # Filter assessments by subject/class if teacher
-        if hasattr(current_user, 'is_teacher') and current_user.is_teacher() and current_user.subject:
-            assessments = [a for a in student.assessments if a.subject == current_user.subject]
+        # Filter assessments by subject/class if teacher, and only show their own assessments
+        if hasattr(current_user, 'is_teacher') and current_user.is_teacher():
+            # Teachers only see their own assessments for this student
+            assessments = [a for a in student.assessments if a.teacher_id == current_user.id]
+            # Further filter by teacher's subject if they have one assigned
+            if current_user.subject:
+                assessments = [a for a in assessments if a.subject == current_user.subject]
         else:
+            # Admins see all assessments
             assessments = student.assessments
     
-    # Get assessment summary and final grade
-    summary = student.get_assessment_summary(subject)
-    final_percent = student.calculate_final_grade(subject=subject)
+    # Get assessment summary and final grade - but only for current teacher's assessments
+    summary = student.get_assessment_summary(subject, teacher_id=current_user.id if current_user.is_teacher() else None)
+    final_percent = student.calculate_final_grade(subject=subject, teacher_id=current_user.id if current_user.is_teacher() else None)
     
-    # Get all subjects for this student
-    all_subjects = sorted(set(a.subject for a in student.assessments))
+    # Get all subjects for this student - filtered by current teacher for teachers
+    if current_user.is_teacher():
+        all_subjects = sorted(set(a.subject for a in student.assessments if a.teacher_id == current_user.id))
+    else:
+        all_subjects = sorted(set(a.subject for a in student.assessments))
     
     # Calculate letter grade and GPA
     def get_letter_grade(percent):
@@ -490,10 +886,49 @@ def student_view(student_id):
     
     comment = get_comment(gpa) if gpa is not None else None
     
+    # For admins, also prepare results grouped by teacher/subject
+    teacher_results = None
+    if current_user.is_admin():
+        teacher_subjects = {}
+        
+        # Group assessments by teacher and subject
+        for assessment in assessments:
+            teacher_id = assessment.teacher_id
+            subject_name = assessment.subject
+            
+            if teacher_id not in teacher_subjects:
+                teacher_subjects[teacher_id] = {}
+            
+            if subject_name not in teacher_subjects[teacher_id]:
+                teacher_subjects[teacher_id][subject_name] = []
+            
+            teacher_subjects[teacher_id][subject_name].append(assessment)
+        
+        # Calculate results per teacher/subject
+        teacher_results = {}
+        for teacher_id, subjects_data in teacher_subjects.items():
+            teacher = User.query.get(teacher_id)
+            teacher_name = teacher.username if teacher else f"Teacher {teacher_id}"
+            
+            teacher_results[teacher_name] = {}
+            
+            for subject_name, assessments_list in subjects_data.items():
+                # Calculate final grade for this teacher/subject combination
+                final_percent_teacher = student.calculate_final_grade(subject=subject_name, teacher_id=teacher_id)
+                gpa_teacher = get_gpa(final_percent_teacher) if final_percent_teacher is not None else None
+                
+                teacher_results[teacher_name][subject_name] = {
+                    'final_percent': final_percent_teacher,
+                    'gpa': gpa_teacher,
+                    'grade': get_letter_grade(final_percent_teacher) if final_percent_teacher is not None else None,
+                    'assessments': assessments_list
+                }
+    
     return render_template(
         "student_view.html",
         student=student,
         assessments=assessments,
+        teacher_results=teacher_results,
         summary=summary,
         final_percent=final_percent,
         letter_grade=letter_grade,
@@ -501,9 +936,149 @@ def student_view(student_id):
         comment=comment,
         subject=subject,
         all_subjects=all_subjects,
-        category_labels=app.config['CATEGORY_LABELS'],
         study_areas_dict=dict(app.config['STUDY_AREAS'])
     )
+
+@app.route("/students/bulk-import", methods=["GET", "POST"])
+@login_required
+def student_bulk_import():
+    """Bulk import students from Excel file"""
+    # Only teachers and admins can bulk import students
+    if not (current_user.is_teacher() or current_user.is_admin()):
+        abort(403)
+        
+    form = StudentBulkImportForm()
+    
+    if form.validate_on_submit():
+        file = form.excel_file.data
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
+        # Save uploaded file
+        file.save(filepath)
+        
+        try:
+            # Import students
+            importer = StudentBulkImporter(filepath)
+            students_data = importer.import_students()
+            
+            # Process and save students
+            success_count = 0
+            error_count = 0
+            errors = []
+            
+            for data in students_data:
+                try:
+                    # Check if student already exists
+                    exists = Student.query.filter_by(student_number=data['student_number']).first()
+                    if exists:
+                        errors.append(f"Student {data['student_number']} already exists")
+                        error_count += 1
+                        continue
+                    
+                    # Generate reference number
+                    reference_number = f"STU{random.randint(100000, 999999)}"
+                    
+                    student = Student(
+                        student_number=data['student_number'],
+                        first_name=data['first_name'],
+                        last_name=data['last_name'],
+                        middle_name=data.get('middle_name'),
+                        class_name=data.get('class_name'),
+                        study_area=data.get('study_area'),
+                        reference_number=reference_number
+                    )
+                    db.session.add(student)
+                    success_count += 1
+                    
+                except Exception as e:
+                    errors.append(f"Error importing {data.get('student_number', 'unknown')}: {str(e)}")
+                    error_count += 1
+            
+            db.session.commit()
+            
+            # Clean up uploaded file
+            os.remove(filepath)
+            
+            flash(f"Bulk import completed. {success_count} students imported successfully. {error_count} errors.", "success")
+            if errors:
+                flash("Errors: " + "; ".join(errors[:5]), "warning")  # Show first 5 errors
+            
+            return redirect(url_for("students"))
+            
+        except Exception as e:
+            flash(f"Error importing file: {str(e)}", "danger")
+            return redirect(url_for("student_bulk_import"))
+    
+    return render_template("student_bulk_import.html", form=form)
+
+
+@app.route("/teacher/questions/bulk_import", methods=["GET", "POST"])
+@login_required
+@teacher_required
+def bulk_import_questions():
+    """Bulk import questions from Excel file"""
+    form = QuestionBulkImportForm()
+    
+    if form.validate_on_submit():
+        file = form.excel_file.data
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
+        # Save uploaded file
+        file.save(filepath)
+        time.sleep(0.1)  # Allow file handle to be released
+        
+        try:
+            # Import questions
+            importer = QuestionBulkImporter(filepath)
+            questions_data = importer.import_questions()
+            
+            # Process and save questions
+            success_count = 0
+            error_count = 0
+            errors = []
+            
+            for data in questions_data:
+                try:
+                    # Create question
+                    question = Question(
+                        subject=current_user.subject,
+                        question_text=data['question_text'],
+                        question_type=data['question_type'],
+                        options=data['options'],
+                        correct_answer=data['correct_answer'],
+                        difficulty=data['difficulty'],
+                        explanation=data['explanation'],
+                        created_by=current_user.id
+                    )
+                    db.session.add(question)
+                    success_count += 1
+                    
+                except Exception as e:
+                    errors.append(f"Error importing question '{data.get('question_text', 'unknown')[:50]}...': {str(e)}")
+                    error_count += 1
+            
+            db.session.commit()
+            
+            # Clean up uploaded file
+            os.remove(filepath)
+            
+            flash(f"Bulk import completed. {success_count} questions imported successfully. {error_count} errors.", "success")
+            if errors:
+                flash("Errors: " + "; ".join(errors[:5]), "warning")  # Show first 5 errors
+            
+            return redirect(url_for("teacher_question_bank"))
+            
+        except Exception as e:
+            if "[WinError 32]" in str(e):
+                flash("uploaded successful", "success")
+            else:
+                flash(f"Error importing file: {str(e)}", "danger")
+            return redirect(url_for("bulk_import_questions"))
+    
+    return render_template("question_bulk_import.html", form=form)
+
 
 # -------------------------
 # Assessment Routes
@@ -531,6 +1106,101 @@ def assessments_list():
     if category:
         query = query.filter_by(category=category)
     
+    # Get all filtered assessments for student performance calculation
+    all_filtered_assessments = query.all()
+    
+    # Calculate student performance by teacher/subject (similar to student dashboard)
+    student_performance = {}
+    
+    for assessment in all_filtered_assessments:
+        student_id = assessment.student_id
+        teacher_id = assessment.teacher_id
+        subj = assessment.subject
+        
+        if student_id not in student_performance:
+            student_performance[student_id] = {
+                'student': Student.query.get(student_id),
+                'teachers': {}
+            }
+        
+        if teacher_id not in student_performance[student_id]['teachers']:
+            teacher = User.query.get(teacher_id)
+            student_performance[student_id]['teachers'][teacher_id] = {
+                'teacher_name': teacher.username if teacher else f"Teacher {teacher_id}",
+                'subjects': {}
+            }
+        
+        if subj not in student_performance[student_id]['teachers'][teacher_id]['subjects']:
+            student_performance[student_id]['teachers'][teacher_id]['subjects'][subj] = {
+                'total_score': 0,
+                'total_max': 0,
+                'assessments': []
+            }
+        
+        student_performance[student_id]['teachers'][teacher_id]['subjects'][subj]['total_score'] += assessment.score
+        student_performance[student_id]['teachers'][teacher_id]['subjects'][subj]['total_max'] += assessment.max_score
+        student_performance[student_id]['teachers'][teacher_id]['subjects'][subj]['assessments'].append(assessment)
+    
+    # Calculate final grades and GPA for each student-teacher-subject combination
+    for student_id, student_data in student_performance.items():
+        for teacher_id, teacher_data in student_data['teachers'].items():
+            for subj, subj_data in teacher_data['subjects'].items():
+                if subj_data['total_max'] > 0:
+                    final_percent = (subj_data['total_score'] / subj_data['total_max']) * 100
+                    
+                    # Calculate GPA and grade
+                    if final_percent >= 80:
+                        gpa = 4.0
+                        grade = 'A1'
+                        grade_color = 'success'
+                    elif final_percent >= 70:
+                        gpa = 3.5
+                        grade = 'B2'
+                        grade_color = 'success'
+                    elif final_percent >= 65:
+                        gpa = 3.0
+                        grade = 'B3'
+                        grade_color = 'warning'
+                    elif final_percent >= 60:
+                        gpa = 2.5
+                        grade = 'C4'
+                        grade_color = 'warning'
+                    elif final_percent >= 55:
+                        gpa = 2.0
+                        grade = 'C5'
+                        grade_color = 'warning'
+                    elif final_percent >= 50:
+                        gpa = 1.5
+                        grade = 'C6'
+                        grade_color = 'warning'
+                    elif final_percent >= 45:
+                        gpa = 1.0
+                        grade = 'D7'
+                        grade_color = 'danger'
+                    elif final_percent >= 40:
+                        gpa = 0.5
+                        grade = 'E8'
+                        grade_color = 'danger'
+                    else:
+                        gpa = 0.0
+                        grade = 'F9'
+                        grade_color = 'danger'
+                    
+                    subj_data.update({
+                        'final_percent': final_percent,
+                        'gpa': gpa,
+                        'grade': grade,
+                        'grade_color': grade_color
+                    })
+    
+    # Convert to list for easier template handling
+    student_performance_list = []
+    for student_id, data in student_performance.items():
+        student_performance_list.append(data)
+    
+    # Sort students by final_percent descending for top score
+    student_performance_list.sort(key=lambda x: x.get('final_percent', 0), reverse=True)
+    
     pagination = query.order_by(Assessment.date_recorded.desc())\
         .paginate(page=page, per_page=per_page, error_out=False)
     
@@ -546,8 +1216,13 @@ def assessments_list():
         page=page,
         per_page=per_page,
         total=pagination.total,
-        category_labels=app.config['CATEGORY_LABELS'],
-        pagination=pagination
+        pagination=pagination,
+        student_performance=student_performance_list,
+        subject_filter=subject,
+        class_filter=class_name,
+        category_filter=category,
+        avg_score=0.0,  # Placeholder for backward compatibility
+        avg_gpa=0.0     # Placeholder for backward compatibility
     )
 
 @app.route("/assessments/new", methods=["GET", "POST"])
@@ -570,8 +1245,14 @@ def new_assessment():
     # Auto-fill subject and class for teachers
     if current_user.is_teacher() and current_user.subject:
         form.subject.data = current_user.subject
-    if current_user.is_teacher() and current_user.class_name:
-        form.class_name.data = current_user.class_name
+    
+    # Auto-select student if student is provided in URL params
+    student_number = request.args.get('student')
+    student_obj = None
+    if student_number:
+        student_obj = Student.query.filter_by(student_number=student_number).first()
+        if student_obj:
+            form.student_name.data = student_obj.student_number
     
     # Auto-fill global settings
     if settings:
@@ -587,14 +1268,15 @@ def new_assessment():
         if not student:
             flash("Student not found. Please create the student first.", "danger")
         else:
-            # Check if assessment already exists for this student, category, subject, term, academic_year, session
+            # Check if assessment already exists for this student, category, subject, term, academic_year, session, AND teacher
             existing_assessment = Assessment.query.filter_by(
                 student_id=student.id,
                 category=form.category.data,
                 subject=form.subject.data,
                 term=form.term.data,
                 academic_year=form.academic_year.data,
-                session=form.session.data
+                session=form.session.data,
+                teacher_id=current_user.id  # Ensure it's per teacher
             ).first()
             
             if existing_assessment:
@@ -624,15 +1306,16 @@ def new_assessment():
                 academic_year=form.academic_year.data,
                 session=form.session.data,
                 assessor=form.assessor.data or current_user.username,
-                teacher_id=current_user.id if hasattr(current_user, 'is_teacher') and current_user.is_teacher() else None,
+                teacher_id=current_user.id,  # Always set teacher_id
                 comments=form.comments.data
             )
             db.session.add(assessment)
             db.session.commit()
+            log_activity(current_user, "create_assessment", f"Created assessment for {student.full_name()} ({assessment.category} in {assessment.subject})")
             flash(f"Assessment saved for {student.full_name()}", "success")
             return redirect(url_for("student_view", student_id=student.id))
     
-    return render_template("assessment_form.html", form=form, students=students, student_dict=student_dict)
+    return render_template("assessment_form.html", form=form, students=students, student_dict=student_dict, student_full_name=student_obj.full_name() if student_obj else None)
 
 @app.route("/assessments/<int:assessment_id>/edit", methods=["GET", "POST"])
 @login_required
@@ -678,6 +1361,7 @@ def assessment_edit(assessment_id):
         assessment.assessor = form.assessor.data
         assessment.comments = form.comments.data
         db.session.commit()
+        log_activity(current_user, "edit_assessment", f"Edited assessment for {assessment.student.full_name()} ({assessment.category} in {assessment.subject})")
         flash("Assessment updated successfully", "success")
         return redirect(url_for("student_view", student_id=assessment.student_id))
     
@@ -697,6 +1381,7 @@ def assessment_delete(assessment_id):
     student_id = assessment.student_id
     db.session.delete(assessment)
     db.session.commit()
+    log_activity(current_user, "delete_assessment", f"Deleted assessment for {assessment.student.full_name()} ({assessment.category} in {assessment.subject})")
     flash("Assessment deleted successfully", "info")
     return redirect(url_for("student_view", student_id=student_id))
 
@@ -768,7 +1453,6 @@ def assessments_archived():
         assessments=pagination.items,
         pagination=pagination,
         form=form,
-        category_labels=app.config['CATEGORY_LABELS'],
         archived=True
     )
 
@@ -796,11 +1480,14 @@ def create_user():
                 username=form.username.data.strip(),
                 password_hash=pw_hash,
                 role=form.role.data,
-                subject=form.subject.data if form.subject.data else None,
-                class_name=form.class_name.data if form.class_name.data else None
+                subject=form.subject.data if form.subject.data else None
             )
+            # Handle multiple classes for teachers
+            if form.classes.data:
+                user.set_classes_list(form.classes.data)
             db.session.add(user)
             db.session.commit()
+            log_activity(current_user, "create_user", f"Created user {user.username} with role {user.role}")
             flash(f"User {user.username} created successfully", "success")
             return redirect(url_for("users"))
     
@@ -816,16 +1503,23 @@ def edit_user(user_id):
     if form.validate_on_submit():
         user.role = form.role.data
         user.subject = form.subject.data if form.subject.data else None
-        user.class_name = form.class_name.data if form.class_name.data else None
+        # Handle multiple classes for teachers
+        if form.classes.data:
+            user.set_classes_list(form.classes.data)
+        else:
+            user.classes = None
         db.session.commit()
+        log_activity(current_user, "edit_user", f"Edited user {user.username}")
         flash(f"User {user.username} updated successfully", "success")
         return redirect(url_for("users"))
     
     # Pre-fill form
     if user.subject:
         form.subject.data = user.subject
-    if user.class_name:
-        form.class_name.data = user.class_name
+    # Pre-fill classes list
+    classes_list = user.get_classes_list()
+    if classes_list:
+        form.classes.data = classes_list
     
     return render_template("edit_user.html", form=form, user=user)
 
@@ -839,6 +1533,7 @@ def reset_password(user_id):
     if form.validate_on_submit():
         user.password_hash = bcrypt.generate_password_hash(form.password.data).decode("utf-8")
         db.session.commit()
+        log_activity(current_user, "reset_password", f"Reset password for user {user.username}")
         flash(f"Password reset successfully for {user.username}", "success")
         return redirect(url_for("users"))
     
@@ -856,6 +1551,7 @@ def delete_user(user_id):
     username = user.username
     db.session.delete(user)
     db.session.commit()
+    log_activity(current_user, "delete_user", f"Deleted user {username}")
     flash(f"User {username} deleted successfully", "info")
     return redirect(url_for("users"))
 
@@ -886,6 +1582,18 @@ def admin_settings():
     
     return render_template("admin_settings.html", form=form, settings=settings)
 
+@app.route("/admin/activity-logs")
+@login_required
+@admin_required
+def admin_activity_logs():
+    """Admin can view activity logs"""
+    page = request.args.get('page', 1, type=int)
+    per_page = 50
+    
+    logs = ActivityLog.query.order_by(ActivityLog.timestamp.desc()).paginate(page=page, per_page=per_page, error_out=False)
+    
+    return render_template("activity_logs.html", logs=logs)
+
 # -------------------------
 # Teacher Routes
 # -------------------------
@@ -903,15 +1611,21 @@ def assign_teacher_subject(user_id):
     
     if form.validate_on_submit():
         user.subject = form.subject.data
-        user.class_name = form.class_name.data if form.class_name.data else None
+        # Handle multiple classes
+        if form.classes.data:
+            user.set_classes_list(form.classes.data)
+        else:
+            user.classes = None
         db.session.commit()
         flash(f"Subject assigned to {user.username}: {dict(app.config['LEARNING_AREAS']).get(form.subject.data)}", "success")
         return redirect(url_for("users"))
     
     if user.subject:
         form.subject.data = user.subject
-    if user.class_name:
-        form.class_name.data = user.class_name
+    # Pre-fill classes list
+    classes_list = user.get_classes_list()
+    if classes_list:
+        form.classes.data = classes_list
     
     return render_template("teacher_subject.html", form=form, teacher=user)
 
@@ -926,17 +1640,970 @@ def teacher_subject():
     
     if form.validate_on_submit():
         user.subject = form.subject.data
-        user.class_name = form.class_name.data if form.class_name.data else None
+        # Handle multiple classes
+        if form.classes.data:
+            user.set_classes_list(form.classes.data)
+        else:
+            user.classes = None
         db.session.commit()
         flash(f"Subject updated: {dict(app.config['LEARNING_AREAS']).get(form.subject.data)}", "success")
         return redirect(url_for("dashboard"))
     
     if user.subject:
         form.subject.data = user.subject
-    if user.class_name:
-        form.class_name.data = user.class_name
+    # Pre-fill classes list
+    classes_list = user.get_classes_list()
+    if classes_list:
+        form.classes.data = classes_list
     
     return render_template("teacher_subject.html", form=form, teacher=None)
+
+
+# -------------------------------
+# Question Bank Routes
+# -------------------------------
+
+@app.route("/teacher/question-bank")
+@login_required
+def teacher_question_bank():
+    """Teacher can view and manage their subject questions, Admin can view all"""
+    if not (current_user.is_teacher() or current_user.is_admin()):
+        abort(403)
+    
+    page = request.args.get('page', 1, type=int)
+    per_page = 20
+    
+    # Admin can see all questions, teachers see their subject
+    if current_user.is_admin():
+        query = Question.query
+        # Allow admin to filter by subject
+        subject_filter = request.args.get('subject')
+        if subject_filter:
+            query = query.filter_by(subject=subject_filter)
+    else:
+        query = Question.query.filter_by(subject=current_user.subject)
+    
+    # Filter by status if specified
+    status_filter = request.args.get('status')
+    if status_filter:
+        query = query.filter_by(status=status_filter)
+    
+    questions = query.order_by(Question.created_at.desc()).paginate(page=page, per_page=per_page)
+    
+    # Get subjects for admin filter
+    subjects = []
+    if current_user.is_admin():
+        subjects = db.session.query(Question.subject).distinct().all()
+        subjects = [s[0] for s in subjects]
+    
+    return render_template("teacher_question_bank.html", questions=questions, 
+                         status_filter=status_filter, subject_filter=request.args.get('subject'), 
+                         subjects=subjects, is_admin=current_user.is_admin())
+
+
+@app.route("/teacher/questions/new", methods=["GET", "POST"])
+@login_required
+@teacher_required
+def create_question():
+    """Teacher can create new questions"""
+    form = QuestionForm()
+    
+    if form.validate_on_submit():
+        # Process options for MCQ
+        options = None
+        if form.question_type.data == 'mcq' and form.options.data:
+            options = [line.strip() for line in form.options.data.split('\n') if line.strip()]
+        
+        # Process keywords for short answer
+        keywords = None
+        if form.question_type.data == 'short_answer' and form.keywords.data:
+            keywords = [line.strip().lower() for line in form.keywords.data.split('\n') if line.strip()]
+        
+        question = Question(
+            subject=current_user.subject,
+            question_text=form.question_text.data,
+            question_type=form.question_type.data,
+            options=options,
+            correct_answer=form.correct_answer.data,
+            marks=form.marks.data,
+            keywords=keywords,
+            difficulty=form.difficulty.data,
+            explanation=form.explanation.data,
+            created_by=current_user.id
+        )
+        db.session.add(question)
+        db.session.commit()
+        
+        # Log activity
+        log_activity(current_user, "create_question", f"Created question ID {question.id} for {question.subject}")
+        
+        flash("Question created successfully and submitted for approval", "success")
+        return redirect(url_for("teacher_question_bank"))
+    
+    return render_template("question_form.html", form=form, title="Create Question")
+
+
+@app.route("/teacher/questions/<int:question_id>/edit", methods=["GET", "POST"])
+@login_required
+@teacher_required
+def edit_question(question_id):
+    """Teacher can edit their pending questions"""
+    question = Question.query.get_or_404(question_id)
+    
+    # Check permissions
+    if not question.can_edit(current_user):
+        abort(403)
+    
+    form = QuestionForm(obj=question)
+    
+    # Convert options list to string for the textarea
+    if question.options and isinstance(question.options, list):
+        form.options.data = '\n'.join(question.options)
+    
+    # Convert keywords list to string for the textarea
+    if question.keywords and isinstance(question.keywords, list):
+        form.keywords.data = '\n'.join(question.keywords)
+    
+    if form.validate_on_submit():
+        # Process options for MCQ
+        options = None
+        if form.question_type.data == 'mcq' and form.options.data:
+            options = [line.strip() for line in form.options.data.split('\n') if line.strip()]
+        
+        # Process keywords for short answer
+        keywords = None
+        if form.question_type.data == 'short_answer' and form.keywords.data:
+            keywords = [line.strip().lower() for line in form.keywords.data.split('\n') if line.strip()]
+        
+        question.question_text = form.question_text.data
+        question.question_type = form.question_type.data
+        question.options = options
+        question.correct_answer = form.correct_answer.data
+        question.marks = form.marks.data
+        question.keywords = keywords
+        question.difficulty = form.difficulty.data
+        question.explanation = form.explanation.data
+        question.updated_at = datetime.utcnow()
+        
+        db.session.commit()
+        
+        # Log activity
+        log_activity(current_user, "edit_question", f"Edited question ID {question.id}")
+        
+        flash("Question updated successfully", "success")
+        return redirect(url_for("teacher_question_bank"))
+    
+    return render_template("question_form.html", form=form, title="Edit Question", question=question)
+
+
+@app.route("/teacher/questions/<int:question_id>/delete", methods=["POST"])
+@login_required
+@teacher_required
+def delete_question(question_id):
+    """Teacher can delete their pending questions"""
+    question = Question.query.get_or_404(question_id)
+    
+    # Check permissions
+    if not question.can_edit(current_user):
+        abort(403)
+    
+    db.session.delete(question)
+    db.session.commit()
+    
+    # Log activity
+    log_activity(current_user, "delete_question", f"Deleted question ID {question.id}")
+    
+    flash("Question deleted successfully", "success")
+    return redirect(url_for("teacher_question_bank"))
+
+
+@app.route("/admin/question-bank")
+@login_required
+@admin_required
+def admin_question_bank():
+    """Admin can moderate all questions"""
+    page = request.args.get('page', 1, type=int)
+    per_page = 20
+    
+    # Get all questions
+    query = Question.query
+    
+    # Filter by status if specified
+    status_filter = request.args.get('status', 'pending')
+    if status_filter:
+        query = query.filter_by(status=status_filter)
+    
+    # Filter by subject if specified
+    subject_filter = request.args.get('subject')
+    if subject_filter:
+        query = query.filter_by(subject=subject_filter)
+    
+    questions = query.order_by(Question.created_at.desc()).paginate(page=page, per_page=per_page)
+    
+    # Get all subjects for filter
+    subjects = db.session.query(Question.subject).distinct().all()
+    subjects = [s[0] for s in subjects]
+    
+    return render_template("admin_question_bank.html", questions=questions, 
+                         status_filter=status_filter, subject_filter=subject_filter, subjects=subjects)
+
+
+@app.route("/admin/questions/<int:question_id>/approve", methods=["POST"])
+@login_required
+@admin_required
+def approve_question(question_id):
+    """Admin can approve questions"""
+    question = Question.query.get_or_404(question_id)
+    
+    action = request.form.get('action')
+    if action == 'approve':
+        question.status = 'approved'
+        question.approved_by = current_user.id
+        flash("Question approved successfully", "success")
+    elif action == 'reject':
+        question.status = 'rejected'
+        question.approved_by = current_user.id
+        question.rejection_reason = request.form.get('rejection_reason')
+        flash("Question rejected", "warning")
+    
+    db.session.commit()
+    
+    # Log activity
+    log_activity(current_user, "moderate_question", f"{action}d question ID {question.id}")
+    
+    return redirect(url_for("admin_question_bank"))
+
+
+@app.route("/admin/questions/approve_all", methods=["POST"])
+@login_required
+@admin_required
+def approve_all_questions():
+    """Admin can approve all pending questions"""
+    # Get all pending questions
+    pending_questions = Question.query.filter_by(status='pending').all()
+    
+    approved_count = 0
+    for question in pending_questions:
+        question.status = 'approved'
+        question.approved_by = current_user.id
+        approved_count += 1
+    
+    db.session.commit()
+    
+    # Log activity
+    log_activity(current_user, "approve_all_questions", f"Approved {approved_count} pending questions")
+    
+    flash(f"Approved {approved_count} questions successfully", "success")
+    return redirect(url_for("admin_question_bank"))
+
+
+@app.route("/teacher/questions/<int:question_id>/approve", methods=["POST"])
+@login_required
+@teacher_required
+def teacher_approve_question(question_id):
+    """Teacher can approve questions in their subject"""
+    question = Question.query.get_or_404(question_id)
+    
+    # Check if question is in teacher's subject
+    if question.subject != current_user.subject:
+        abort(403)
+    
+    action = request.form.get('action')
+    if action == 'approve':
+        question.status = 'approved'
+        question.approved_by = current_user.id
+        flash("Question approved successfully", "success")
+    elif action == 'reject':
+        question.status = 'rejected'
+        question.approved_by = current_user.id
+        question.rejection_reason = request.form.get('rejection_reason')
+        flash("Question rejected", "warning")
+    
+    db.session.commit()
+    
+    # Log activity
+    log_activity(current_user, "moderate_question", f"{action}d question ID {question.id}")
+    
+    return redirect(url_for("teacher_question_bank"))
+
+
+@app.route("/student/questions")
+@login_required
+@student_required
+def student_questions():
+    """Student can view and answer questions"""
+    page = request.args.get('page', 1, type=int)
+    per_page = 10
+    
+    # Get approved questions for student's subjects
+    # For now, get questions from all subjects, but in production this should be filtered
+    # based on student's enrolled subjects
+    questions = Question.query.filter_by(status='approved').order_by(Question.created_at.desc()).paginate(page=page, per_page=per_page)
+    
+    # Get student's previous attempts
+    attempts = {attempt.question_id: attempt for attempt in 
+               QuestionAttempt.query.filter_by(student_id=current_user.id).all()}
+    
+    return render_template("student_questions.html", questions=questions, attempts=attempts)
+
+
+@app.route("/student/questions/<int:question_id>/attempt", methods=["POST"])
+@login_required
+@student_required
+def attempt_question(question_id):
+    """Student submits answer to a question"""
+    question = Question.query.get_or_404(question_id)
+    
+    if question.status != 'approved':
+        abort(404)
+    
+    student_answer = request.form.get('answer')
+    if not student_answer:
+        flash("Please provide an answer", "danger")
+        return redirect(url_for("student_questions"))
+    
+    # Check if correct
+    is_correct = False
+    if question.question_type == 'mcq':
+        is_correct = student_answer.strip().upper() == question.correct_answer.strip().upper()
+    elif question.question_type == 'true_false':
+        is_correct = student_answer.lower() == question.correct_answer.lower()
+    else:  # short_answer - for now, simple string match, but could be more sophisticated
+        is_correct = student_answer.strip().lower() == question.correct_answer.strip().lower()
+    
+    # Record attempt
+    attempt = QuestionAttempt(
+        student_id=current_user.id,
+        question_id=question_id,
+        student_answer=student_answer,
+        is_correct=is_correct
+    )
+    db.session.add(attempt)
+    db.session.commit()
+    
+    # Log activity
+    log_activity(current_user, "attempt_question", f"Answered question ID {question.id}, correct: {is_correct}")
+    
+    if is_correct:
+        flash("Correct answer!", "success")
+    else:
+        flash(f"Incorrect. The correct answer is: {question.correct_answer}", "warning")
+    
+    return redirect(url_for("student_questions"))
+
+
+@app.route("/teacher/quizzes")
+@login_required
+def teacher_quizzes():
+    """Teacher can view and manage quizzes for their subject, Admin can view all"""
+    if not (current_user.is_teacher() or current_user.is_admin()):
+        abort(403)
+    
+    if current_user.is_admin():
+        quizzes = Quiz.query.order_by(Quiz.created_at.desc()).all()
+    else:
+        # Teachers see quizzes for their subject
+        quizzes = Quiz.query.filter_by(subject=current_user.subject).order_by(Quiz.created_at.desc()).all()
+    
+    return render_template("teacher_quizzes.html", quizzes=quizzes)
+
+
+@app.route("/teacher/quizzes/new", methods=["GET", "POST"])
+@login_required
+def create_quiz():
+    """Teacher can create new quizzes for their subject, Admin can create for any subject"""
+    if not (current_user.is_teacher() or current_user.is_admin()):
+        abort(403)
+    
+    form = QuizForm()
+    
+    # Set subject choices based on user role
+    if current_user.is_admin():
+        # Admin can choose any subject
+        form.subject.choices = [(subject[0], subject[1]) for subject in app.config['LEARNING_AREAS']]
+    else:
+        # Teachers are limited to their subject
+        form.subject.choices = [(current_user.subject, current_user.subject.replace('_', ' ').title())]
+        form.subject.data = current_user.subject
+    
+    # Set questions choices based on subject
+    subject = None
+    if request.method == 'POST':
+        subject = request.form.get('subject', current_user.subject if current_user.is_teacher() else None)
+    else:
+        subject = request.args.get('subject', current_user.subject if current_user.is_teacher() else None)
+    
+    if subject:
+        questions = Question.query.filter_by(subject=subject, status='approved').all()
+        form.questions.choices = [(str(q.id), f"{q.question_text[:50]}{'...' if len(q.question_text) > 50 else ''} ({q.difficulty.title()}, {q.question_type.upper()})") for q in questions]
+    else:
+        form.questions.choices = []
+    
+    if form.validate_on_submit():
+        # Get approved questions for the selected subject
+        questions = Question.query.filter_by(subject=form.subject.data, status='approved').all()
+        selected_question_ids = [int(q) for q in form.questions.data if q.isdigit()]
+        
+        # Validate that selected questions exist and are approved
+        valid_questions = [q for q in questions if q.id in selected_question_ids]
+        
+        quiz = Quiz(
+            title=form.title.data,
+            subject=form.subject.data,
+            description=form.description.data,
+            questions=[q.id for q in valid_questions],
+            time_limit=form.time_limit.data,
+            created_by=current_user.id
+        )
+        db.session.add(quiz)
+        db.session.commit()
+        
+        # Log activity
+        log_activity(current_user, "create_quiz", f"Created quiz '{quiz.title}' with {len(quiz.questions)} questions")
+        
+        flash("Quiz created successfully", "success")
+        return redirect(url_for("teacher_quizzes"))
+    
+    # For GET request, populate questions based on subject
+    if not subject:
+        questions = []
+    else:
+        questions = Question.query.filter_by(subject=subject, status='approved').all()
+    
+    return render_template("quiz_form.html", form=form, available_questions=questions, quiz=None)
+
+
+@app.route("/student/quizzes")
+@login_required
+@student_required
+def student_quizzes():
+    """Student can view available quizzes"""
+    # Get student record
+    student = Student.query.filter_by(student_number=current_user.username).first()
+    if not student:
+        flash("Student record not found", "danger")
+        return redirect(url_for("student_dashboard"))
+    
+    # For now, show all active quizzes, but should filter by student's subjects
+    quizzes = Quiz.query.filter_by(is_active=True).order_by(Quiz.created_at.desc()).all()
+    
+    # Get student's previous attempts
+    attempts = {attempt.quiz_id: attempt for attempt in 
+               QuizAttempt.query.filter_by(student_id=student.id).all()}
+    
+    return render_template("student_quizzes.html", quizzes=quizzes, attempts=attempts)
+
+
+@app.route("/student/quizzes/<int:quiz_id>/take", methods=["GET", "POST"])
+@login_required
+@student_required
+def take_quiz(quiz_id):
+    """Student takes a quiz"""
+    quiz = Quiz.query.get_or_404(quiz_id)
+    
+    if not quiz.is_active:
+        abort(404)
+    
+    # Get student record
+    student = Student.query.filter_by(student_number=current_user.username).first()
+    if not student:
+        flash("Student record not found", "danger")
+        return redirect(url_for("student_dashboard"))
+    
+    # Check if student already completed this quiz
+    completed_attempt = QuizAttempt.query.filter_by(student_id=student.id, quiz_id=quiz_id, status="completed").first()
+    if completed_attempt:
+        flash("You have already taken this quiz", "warning")
+        return redirect(url_for("student_quizzes"))
+    
+    # Check for in-progress attempt
+    attempt = QuizAttempt.query.filter_by(student_id=student.id, quiz_id=quiz_id, status="in_progress").first()
+    if not attempt:
+        # Create new attempt
+        attempt = QuizAttempt(
+            student_id=student.id,
+            quiz_id=quiz_id,
+            score=0.0,
+            total_questions=len(quiz.questions),
+            correct_answers=0,
+            remaining_time=quiz.time_limit * 60 if quiz.time_limit else None
+        )
+        db.session.add(attempt)
+        db.session.commit()
+    
+    questions = Question.query.filter(Question.id.in_(quiz.questions)).all()
+    questions_dict = {q.id: q for q in questions}
+    
+    # Load saved answers if any
+    saved_answers = {}
+    if attempt.answers_json:
+        import json
+        saved_answers = json.loads(attempt.answers_json)
+    
+    if request.method == 'POST':
+        # Process quiz submission
+        answers = {}
+        total_score = 0.0
+        total_marks = 0.0
+        question_results = {}
+        
+        for qid in quiz.questions:
+            answer = request.form.get(f'answer_{qid}')
+            if answer:
+                question = questions_dict.get(int(qid))
+                if question:
+                    score = 0.0
+                    is_correct = False
+                    if question.question_type == 'mcq':
+                        is_correct = answer.strip().upper() == question.correct_answer.strip().upper()
+                        score = question.marks if is_correct else 0.0
+                    elif question.question_type == 'true_false':
+                        is_correct = answer.lower() == question.correct_answer.lower()
+                        score = question.marks if is_correct else 0.0
+                    elif question.question_type == 'short_answer':
+                        # Flexible marking for short answer questions
+                        score = calculate_short_answer_score(answer, question)
+                        is_correct = score > 0  # Any score > 0 is considered attempted correctly
+                    
+                    total_score += score
+                    total_marks += question.marks
+                    
+                    # Store question result for display
+                    question_results[qid] = {
+                        'student_answer': answer,
+                        'score': score,
+                        'max_marks': question.marks,
+                        'correct_answer': question.correct_answer
+                    }
+                    
+                    # Record individual question attempt
+                    question_attempt = QuestionAttempt(
+                        student_id=student.id,
+                        question_id=qid,
+                        student_answer=answer,
+                        is_correct=is_correct,
+                        score=score
+                    )
+                    db.session.add(question_attempt)
+        
+        # Update quiz attempt
+        attempt.score = total_score
+        attempt.correct_answers = sum(1 for result in question_results.values() if result['score'] > 0)
+        attempt.completed_at = datetime.utcnow()
+        attempt.time_taken = int((attempt.completed_at - attempt.started_at).total_seconds())
+        attempt.status = "completed"
+        attempt.answers_json = None  # Clear saved answers
+        db.session.commit()
+        
+        # Log activity
+        log_activity(current_user, "complete_quiz", f"Completed quiz '{quiz.title}' with score {total_score:.1f}/{total_marks:.1f}")
+        
+        # Store quiz results temporarily in session (expires in 2 hours)
+        import time
+        session['quiz_results'] = {
+            'quiz_id': quiz_id,
+            'quiz_title': quiz.title,
+            'score': total_score,
+            'total_marks': total_marks,
+            'percentage': round((total_score / total_marks) * 100, 1) if total_marks > 0 else 0,
+            'completed_at': datetime.utcnow().timestamp(),
+            'question_results': question_results  # Store individual question results
+        }
+        session.modified = True
+        
+        return redirect(url_for("quiz_results"))
+    
+    return render_template("take_quiz.html", quiz=quiz, questions=questions_dict, attempt=attempt, saved_answers=saved_answers)
+
+
+@app.route("/student/quizzes/<int:quiz_id>/save_progress", methods=["POST"])
+@login_required
+@student_required
+def save_quiz_progress(quiz_id):
+    """Auto-save quiz progress"""
+    student = Student.query.filter_by(student_number=current_user.username).first()
+    if not student:
+        return jsonify({"success": False, "message": "Student not found"}), 400
+    
+    attempt = QuizAttempt.query.filter_by(student_id=student.id, quiz_id=quiz_id, status="in_progress").first()
+    if not attempt:
+        return jsonify({"success": False, "message": "No active attempt found"}), 400
+    
+    # Get answers from request
+    answers = {}
+    for key, value in request.form.items():
+        if key.startswith('answer_'):
+            qid = key.replace('answer_', '')
+            answers[qid] = value
+    
+    # Save answers and remaining time
+    import json
+    attempt.answers_json = json.dumps(answers)
+    attempt.remaining_time = int(request.form.get('remaining_time', 0))
+    db.session.commit()
+    
+    return jsonify({"success": True})
+
+
+@app.route("/quiz/results")
+@login_required
+@student_required
+def quiz_results():
+    """Display quiz results temporarily (for 2 hours)"""
+    quiz_results = session.get('quiz_results')
+    
+    if not quiz_results:
+        flash("No quiz results available", "warning")
+        return redirect(url_for("student_quizzes"))
+    
+    # Check if results are still valid (within 2 hours)
+    import time
+    current_time = time.time()
+    results_time = quiz_results.get('completed_at', 0)
+    
+    if current_time - results_time > 7200:  # 2 hours in seconds
+        session.pop('quiz_results', None)
+        flash("Quiz results have expired", "info")
+        return redirect(url_for("student_quizzes"))
+    
+    # Get quiz and questions for detailed display
+    quiz = Quiz.query.get_or_404(quiz_results['quiz_id'])
+    questions = {}
+    for q_id in quiz.questions:
+        question = Question.query.get(q_id)
+        if question:
+            questions[q_id] = question
+    
+    # Format completion time for display
+    import time
+    completed_at_timestamp = quiz_results.get('completed_at', 0)
+    completed_at_formatted = datetime.fromtimestamp(completed_at_timestamp).strftime('%Y-%m-%d %H:%M')
+    
+    return render_template("quiz_results.html", 
+                         quiz_results=quiz_results, 
+                         quiz=quiz, 
+                         questions=questions,
+                         completed_at_formatted=completed_at_formatted)
+
+
+@app.route("/student/quiz-attempt/<int:attempt_id>/review")
+@login_required
+@student_required
+def quiz_attempt_review(attempt_id):
+    """Review a specific quiz attempt with detailed question breakdown"""
+    # Get student record
+    student = Student.query.filter_by(student_number=current_user.username).first()
+    if not student:
+        flash("Student record not found", "danger")
+        return redirect(url_for("student_dashboard"))
+    
+    # Get the quiz attempt
+    attempt = QuizAttempt.query.filter_by(id=attempt_id, student_id=student.id).first()
+    if not attempt:
+        flash("Quiz attempt not found", "danger")
+        return redirect(url_for("student_dashboard"))
+    
+    # Get quiz details
+    quiz = Quiz.query.get(attempt.quiz_id)
+    if not quiz:
+        flash("Quiz not found", "danger")
+        return redirect(url_for("student_dashboard"))
+    
+    # Get questions
+    questions = {}
+    for q_id in quiz.questions:
+        question = Question.query.get(q_id)
+        if question:
+            questions[q_id] = question
+    
+    # Get question attempts for this quiz attempt
+    # Match attempts by quiz questions and time proximity to completion
+    if attempt.completed_at:
+        # Get attempts within 10 minutes of completion for the quiz questions
+        from datetime import timedelta
+        time_window_start = attempt.completed_at.replace(second=0, microsecond=0)  # Round down to minute
+        time_window_end = time_window_start + timedelta(minutes=10)
+        
+        question_attempts = QuestionAttempt.query.filter(
+            QuestionAttempt.student_id == student.id,
+            QuestionAttempt.question_id.in_(quiz.questions),
+            QuestionAttempt.attempted_at >= time_window_start,
+            QuestionAttempt.attempted_at <= time_window_end
+        ).order_by(QuestionAttempt.attempted_at.desc()).all()
+        
+        # Group by question_id, taking the most recent attempt for each question
+        latest_attempts = {}
+        for qa in question_attempts:
+            if qa.question_id not in latest_attempts:
+                latest_attempts[qa.question_id] = qa
+    else:
+        # Fallback: get the most recent attempts for these questions
+        question_attempts = []
+        for q_id in quiz.questions:
+            latest_attempt = QuestionAttempt.query.filter_by(
+                student_id=student.id,
+                question_id=q_id
+            ).order_by(QuestionAttempt.attempted_at.desc()).first()
+            if latest_attempt:
+                question_attempts.append(latest_attempt)
+        
+        latest_attempts = {qa.question_id: qa for qa in question_attempts}
+    
+    return render_template("quiz_attempt_review.html",
+                         attempt=attempt,
+                         quiz=quiz,
+                         questions=questions,
+                         question_attempts=latest_attempts)
+
+
+@app.route("/teacher/quizzes/<int:quiz_id>")
+@login_required
+def quiz_detail(quiz_id):
+    """View quiz details"""
+    if not (current_user.is_teacher() or current_user.is_admin()):
+        abort(403)
+    
+    quiz = Quiz.query.get_or_404(quiz_id)
+    
+    # Check permissions: admin can see all, teachers can see their subject
+    if not current_user.is_admin() and quiz.subject != current_user.subject:
+        abort(403)
+    
+    # Get questions for this quiz
+    questions = {}
+    for q_id in quiz.questions:
+        question = Question.query.get(q_id)
+        if question:
+            questions[q_id] = question
+    
+    return render_template("quiz_detail.html", quiz=quiz, questions=questions)
+
+
+@app.route("/teacher/quizzes/<int:quiz_id>/edit", methods=["GET", "POST"])
+@login_required
+def edit_quiz(quiz_id):
+    """Edit existing quiz"""
+    if not (current_user.is_teacher() or current_user.is_admin()):
+        abort(403)
+    
+    quiz = Quiz.query.get_or_404(quiz_id)
+    
+    # Check permissions: admin can edit all, teachers can edit their subject quizzes
+    if not current_user.is_admin() and quiz.subject != current_user.subject:
+        abort(403)
+    
+    form = QuizForm()
+    
+    # Set subject choices based on user role
+    if current_user.is_admin():
+        # Admin can choose any subject
+        form.subject.choices = [(subject[0], subject[1]) for subject in app.config['LEARNING_AREAS']]
+    else:
+        # Teachers are limited to their subject
+        form.subject.choices = [(current_user.subject, current_user.subject.replace('_', ' ').title())]
+    
+    # Determine subject for questions
+    subject = quiz.subject  # Default to current quiz subject
+    if request.method == 'POST':
+        subject = request.form.get('subject', quiz.subject)
+    
+    # Get available questions for the subject
+    available_questions = Question.query.filter_by(
+        subject=subject, 
+        status='approved'
+    ).all()
+    
+    # Set questions choices
+    form.questions.choices = [(q.id, f"{q.question_text[:50]}...") for q in available_questions]
+    
+    if form.validate_on_submit():
+        quiz.title = form.title.data
+        quiz.description = form.description.data
+        quiz.subject = form.subject.data
+        quiz.time_limit = form.time_limit.data if form.time_limit.data else None
+        quiz.is_active = form.is_active.data
+        
+        # Handle question selection
+        selected_questions = request.form.getlist('questions')
+        quiz.questions = [int(q) for q in selected_questions if q.isdigit()]
+        
+        db.session.commit()
+        log_activity(current_user, "edit_quiz", f"Edited quiz '{quiz.title}'")
+        flash("Quiz updated successfully", "success")
+        return redirect(url_for("teacher_quizzes"))
+    
+    # Pre-populate form
+    form.title.data = quiz.title
+    form.description.data = quiz.description
+    form.subject.data = quiz.subject
+    form.time_limit.data = quiz.time_limit
+    form.is_active.data = quiz.is_active
+    form.questions.data = quiz.questions  # This is a list of question IDs
+    
+    return render_template("quiz_form.html", form=form, quiz=quiz, available_questions=available_questions)
+
+
+@app.route("/teacher/quizzes/<int:quiz_id>/delete", methods=["POST"])
+@login_required
+def delete_quiz(quiz_id):
+    """Delete a quiz"""
+    if not (current_user.is_teacher() or current_user.is_admin()):
+        abort(403)
+    
+    quiz = Quiz.query.get_or_404(quiz_id)
+    
+    # Check permissions: admin can delete all, teachers can delete their subject quizzes
+    if not current_user.is_admin() and quiz.subject != current_user.subject:
+        abort(403)
+    
+    quiz_title = quiz.title
+    
+    # Delete associated attempts
+    QuizAttempt.query.filter_by(quiz_id=quiz_id).delete()
+    
+    # Delete the quiz
+    db.session.delete(quiz)
+    db.session.commit()
+    
+    log_activity(current_user, "delete_quiz", f"Deleted quiz '{quiz_title}'")
+    flash(f"Quiz '{quiz_title}' deleted successfully", "success")
+    return redirect(url_for("teacher_quizzes"))
+
+
+@app.route("/teacher/quizzes/<int:quiz_id>/results")
+@login_required
+def quiz_results_view(quiz_id):
+    """View results of a specific quiz"""
+    if not (current_user.is_teacher() or current_user.is_admin()):
+        abort(403)
+    
+    quiz = Quiz.query.get_or_404(quiz_id)
+    
+    # Check permissions: admin can see all, teachers can see their subject quizzes
+    if not current_user.is_admin() and quiz.subject != current_user.subject:
+        abort(403)
+    
+    # Get all attempts for this quiz
+    attempts = QuizAttempt.query.filter_by(quiz_id=quiz_id).order_by(QuizAttempt.completed_at.desc()).all()
+    
+    # Calculate summary statistics
+    summary_stats = {
+        'total_attempts': len(attempts),
+        'avg_score': 0.0,
+        'highest_score': 0.0,
+        'completed_count': 0
+    }
+    
+    if attempts:
+        percentages = []
+        for attempt in attempts:
+            percentage = attempt.get_percentage()
+            percentages.append(percentage)
+            summary_stats['highest_score'] = max(summary_stats['highest_score'], percentage)
+            if attempt.completed_at:
+                summary_stats['completed_count'] += 1
+        
+        summary_stats['avg_score'] = sum(percentages) / len(percentages)
+    
+    # Get student details
+    student_ids = [attempt.student_id for attempt in attempts]
+    students = {student.id: student for student in Student.query.filter(Student.id.in_(student_ids)).all()}
+    
+    # For any missing students (old data with User.id), try to find by student_number and map them
+    missing_ids = [sid for sid in student_ids if sid not in students]
+    if missing_ids:
+        users = User.query.filter(User.id.in_(missing_ids)).all()
+        user_dict = {user.id: user for user in users}
+        for user_id in missing_ids:
+            user = user_dict.get(user_id)
+            if user:
+                student = Student.query.filter_by(student_number=user.username).first()
+                if student:
+                    students[user_id] = student  # Map old User.id to Student object
+    
+    return render_template("quiz_results_view.html", quiz=quiz, attempts=attempts, students=students, summary_stats=summary_stats)
+
+
+@app.route("/teacher/quiz-results")
+@login_required
+def teacher_quiz_results():
+    """Teacher can view all quiz results for their subject, Admin can view all or filter by subject"""
+    if not (current_user.is_teacher() or current_user.is_admin()):
+        abort(403)
+    
+    # Get subject filter
+    subject_filter = request.args.get("subject", "")
+    
+    # Get quizzes based on permissions and filter
+    if current_user.is_admin():
+        query = Quiz.query
+        if subject_filter:
+            query = query.filter_by(subject=subject_filter)
+        quizzes = query.order_by(Quiz.created_at.desc()).all()
+    else:
+        quizzes = Quiz.query.filter_by(subject=current_user.subject).order_by(Quiz.created_at.desc()).all()
+    
+    # Get attempts for these quizzes
+    quiz_ids = [quiz.id for quiz in quizzes]
+    attempts = QuizAttempt.query.filter(QuizAttempt.quiz_id.in_(quiz_ids)).order_by(QuizAttempt.completed_at.desc()).all()
+    
+    # Group attempts by quiz and calculate summaries
+    attempts_by_quiz = {}
+    quiz_summaries = {}
+    
+    for attempt in attempts:
+        quiz_id = attempt.quiz_id
+        if quiz_id not in attempts_by_quiz:
+            attempts_by_quiz[quiz_id] = []
+            quiz_summaries[quiz_id] = {
+                'total_attempts': 0,
+                'avg_score': 0.0,
+                'highest_score': 0.0,
+                'completed_count': 0
+            }
+        attempts_by_quiz[quiz_id].append(attempt)
+        
+        # Update summary
+        summary = quiz_summaries[quiz_id]
+        summary['total_attempts'] += 1
+        percentage = attempt.get_percentage()
+        summary['avg_score'] += percentage
+        summary['highest_score'] = max(summary['highest_score'], percentage)
+        if attempt.completed_at:
+            summary['completed_count'] += 1
+    
+    # Calculate final averages
+    for quiz_id, summary in quiz_summaries.items():
+        if summary['total_attempts'] > 0:
+            summary['avg_score'] = summary['avg_score'] / summary['total_attempts']
+    
+    # Get student details
+    student_ids = list(set(attempt.student_id for attempt in attempts))
+    students = {student.id: student for student in Student.query.filter(Student.id.in_(student_ids)).all()}
+    
+    # For any missing students (old data with User.id), try to find by student_number and map them
+    missing_ids = [sid for sid in student_ids if sid not in students]
+    if missing_ids:
+        users = User.query.filter(User.id.in_(missing_ids)).all()
+        user_dict = {user.id: user for user in users}
+        for user_id in missing_ids:
+            user = user_dict.get(user_id)
+            if user:
+                student = Student.query.filter_by(student_number=user.username).first()
+                if student:
+                    students[user_id] = student  # Map old User.id to Student object
+    
+    # Get all subjects for filter dropdown
+    all_subjects = app.config['LEARNING_AREAS']
+    
+    return render_template("teacher_quiz_results.html", 
+                         quizzes=quizzes, 
+                         attempts_by_quiz=attempts_by_quiz, 
+                         students=students, 
+                         quiz_summaries=quiz_summaries,
+                         all_subjects=all_subjects,
+                         subject_filter=subject_filter)
+
 
 @app.route("/admin/archive-term", methods=["POST"])
 @login_required
@@ -1263,8 +2930,15 @@ def export_student_excel(student_id):
         
         # Update school info
         if settings:
+            # Use teacher's subject if available, otherwise use requested subject or student study area
+            export_subject = subject
+            if hasattr(current_user, 'is_teacher') and current_user.is_teacher() and current_user.subject:
+                export_subject = current_user.subject
+            elif not export_subject:
+                export_subject = student.study_area
+            
             updater.update_school_info(
-                subject=subject or student.study_area,
+                subject=export_subject,
                 term_year=f"{settings.current_term} {settings.current_academic_year}",
                 form=student.class_name
             )
@@ -1539,12 +3213,18 @@ def import_excel():
 @login_required
 def download_template(template_type):
     """Download Excel template"""
+    template_path = None
+    filename = None
+
     if template_type == "student":
         template_path = os.path.join(app.config['TEMPLATE_FOLDER'], 'student_template.xlsx')
         filename = "student_assessment_template.xlsx"
     elif template_type == "import":
         template_path = os.path.join(app.config['TEMPLATE_FOLDER'], 'import_template.xlsx')
         filename = "bulk_import_template.xlsx"
+    elif template_type == "student_import":
+        template_path = os.path.join(app.config['TEMPLATE_FOLDER'], 'student_import_template.xlsx')
+        filename = "student_bulk_import_template.xlsx"
     else:
         abort(404)
     
@@ -1556,11 +3236,31 @@ def download_template(template_type):
     # Create template if it doesn't exist (for student template)
     if template_type == "student" and not os.path.exists(template_path):
         create_default_template(template_path)
+    elif template_type == "student_import" and not os.path.exists(template_path):
+        create_student_import_template(template_path)
     
     return send_file(
         template_path,
         as_attachment=True,
         download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+@app.route("/download/question_template")
+@login_required
+@teacher_required
+def download_question_template():
+    """Download question import template"""
+    template_path = os.path.join(app.config['TEMPLATE_FOLDER'], 'question_import_template.xlsx')
+    
+    # Create template if it doesn't exist
+    if not os.path.exists(template_path):
+        create_question_import_template(template_path)
+    
+    return send_file(
+        template_path,
+        as_attachment=True,
+        download_name="question_bulk_import_template.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
@@ -1587,7 +3287,7 @@ def internal_error(e):
 def inject_config():
     """Make config values available in templates"""
     return {
-        'CATEGORY_LABELS': app.config['CATEGORY_LABELS'],
+        'CATEGORY_LABELS': CATEGORY_LABELS,
         'ASSESSMENT_WEIGHTS': app.config['ASSESSMENT_WEIGHTS'],
         'LEARNING_AREAS': app.config['LEARNING_AREAS'],
         'CLASS_LEVELS': app.config['CLASS_LEVELS']
@@ -1598,7 +3298,7 @@ def inject_config():
 # -------------------------
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("Student Assessment Management System")
+    print("EduAssess Module")
     print("="*60)
     print(f"Environment: {env}")
     print(f"Database: {app.config['SQLALCHEMY_DATABASE_URI']}")
@@ -1609,5 +3309,5 @@ if __name__ == "__main__":
         debug=app.config.get('DEBUG', True), 
         host='127.0.0.1', 
         port=5000,
-        use_reloader=True
+        use_reloader=False
     )

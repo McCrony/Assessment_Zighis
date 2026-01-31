@@ -24,7 +24,7 @@
       {% for a in recent %}
         <li class="list-group-item">
           <strong>{{ a.student.full_name() }}</strong><br>
-          <small>{{ category_labels.get(a.category, a.category) }} — {{ a.subject or '—' }}</small><br>
+          <small>{{ CATEGORY_LABELS.get(a.category, a.category) }} — {{ a.subject or '—' }}</small><br>
           <strong>{{ a.score }}/{{ a.max_score }}</strong>
         </li>
       {% else %}

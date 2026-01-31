@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+
+{% block title %}My Messages - EduAssess Pro{% endblock %}
+
+{% block page_title %}My Messages{% endblock %}
+
+{% block breadcrumbs %}
+<li class="breadcrumb-item"><a href="{{ url_for('dashboard') }}">Dashboard</a></li>
+<li class="breadcrumb-item active">Messages</li>
+{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-lg-10 mx-auto">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-envelope me-2"></i>My Messages
+                </h5>
+                <span class="badge bg-primary">{{ messages.total }} messages</span>
+            </div>
+            <div class="card-body">
+                {% if messages.items %}
+                    <div class="list-group list-group-flush">
+                        {% for message in messages.items %}
+                        <a href="{{ url_for('view_message', message_id=message.id) }}" class="list-group-item list-group-item-action px-0 {% if not message.is_read %}bg-light{% endif %}">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div class="flex-grow-1">
+                                    <div class="d-flex align-items-center mb-1">
+                                        <h6 class="mb-0 me-2">{{ message.subject }}</h6>
+                                        {% if not message.is_read %}
+                                            <span class="badge bg-danger rounded-pill">New</span>
+                                        {% endif %}
+                                    </div>
+                                    <p class="mb-1 text-muted small">{{ message.content[:150] }}{% if message.content|length > 150 %}...{% endif %}</p>
+                                    <div class="d-flex align-items-center">
+                                        <small class="text-muted me-3">
+                                            <i class="bi bi-person me-1"></i>From: {{ message.sender.username }}
+                                        </small>
+                                        <small class="text-muted me-3">
+                                            <i class="bi bi-clock me-1"></i>{{ message.created_at.strftime('%Y-%m-%d %H:%M') }}
+                                        </small>
+                                        <span class="badge bg-{{ 'success' if message.message_type == 'notification' else 'warning' if message.message_type == 'update' else 'danger' }} small">
+                                            {{ message.message_type.title() }}
+                                        </span>
+                                    </div>
+                                </div>
+                                <div class="text-end">
+                                    <i class="bi bi-chevron-right text-muted"></i>
+                                </div>
+                            </div>
+                        </a>
+                        {% endfor %}
+                    </div>
+                    
+                    <!-- Pagination -->
+                    {% if messages.pages > 1 %}
+                    <nav aria-label="Message pagination" class="mt-4">
+                        <ul class="pagination justify-content-center">
+                            {% if messages.has_prev %}
+                                <li class="page-item">
+                                    <a class="page-link" href="{{ url_for('user_messages', page=messages.prev_num) }}">
+                                        <i class="bi bi-chevron-left"></i>
+                                    </a>
+                                </li>
+                            {% else %}
+                                <li class="page-item disabled">
+                                    <span class="page-link"><i class="bi bi-chevron-left"></i></span>
+                                </li>
+                            {% endif %}
+                            
+                            {% for page_num in messages.iter_pages() %}
+                                {% if page_num %}
+                                    <li class="page-item {% if page_num == messages.page %}active{% endif %}">
+                                        <a class="page-link" href="{{ url_for('user_messages', page=page_num) }}">{{ page_num }}</a>
+                                    </li>
+                                {% else %}
+                                    <li class="page-item disabled">
+                                        <span class="page-link">...</span>
+                                    </li>
+                                {% endif %}
+                            {% endfor %}
+                            
+                            {% if messages.has_next %}
+                                <li class="page-item">
+                                    <a class="page-link" href="{{ url_for('user_messages', page=messages.next_num) }}">
+                                        <i class="bi bi-chevron-right"></i>
+                                    </a>
+                                </li>
+                            {% else %}
+                                <li class="page-item disabled">
+                                    <span class="page-link"><i class="bi bi-chevron-right"></i></span>
+                                </li>
+                            {% endif %}
+                        </ul>
+                    </nav>
+                    {% endif %}
+                {% else %}
+                    <div class="text-center py-5">
+                        <i class="bi bi-envelope-x display-1 text-muted mb-3"></i>
+                        <h5 class="text-muted">No messages yet</h5>
+                        <p class="text-muted">You haven't received any messages yet.</p>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
